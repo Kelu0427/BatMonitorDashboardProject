@@ -60,8 +60,9 @@ from .panel import MonitorPanel
 class DashboardSignals(QObject):
     discord_message_id_changed = Signal(str)
     update_available = Signal(object)
+    update_current = Signal(str)
     update_downloaded = Signal(str, str)
-    update_failed = Signal(str)
+    update_failed = Signal(str, bool)
 
 
 class DashboardWindow(QMainWindow):
@@ -89,6 +90,7 @@ class DashboardWindow(QMainWindow):
         self.signals = DashboardSignals()
         self.signals.discord_message_id_changed.connect(self._store_discord_message_id)
         self.signals.update_available.connect(self._handle_update_available)
+        self.signals.update_current.connect(self._handle_update_current)
         self.signals.update_downloaded.connect(self._handle_update_downloaded)
         self.signals.update_failed.connect(self._handle_update_failed)
 
@@ -185,6 +187,7 @@ class DashboardWindow(QMainWindow):
             self.discord_interval_minutes,
             self.discord_status_title,
             self.open_config_folder,
+            self.check_for_updates_manual,
         )
         if dialog.exec() == QDialog.Accepted and dialog.result_settings:
             old_webhook_url = self.discord_webhook_url
@@ -379,14 +382,19 @@ class DashboardWindow(QMainWindow):
         else:
             subprocess.Popen(["explorer", str(self.config_path.parent)])
 
-    def check_for_updates(self) -> None:
+    def check_for_updates_manual(self) -> None:
+        self.check_for_updates(manual=True)
+
+    def check_for_updates(self, manual: bool = False) -> None:
         if self.update_checking:
+            if manual:
+                QMessageBox.information(self, "檢查更新", "正在檢查更新，請稍候。")
             return
         self.update_checking = True
-        thread = threading.Thread(target=self._check_for_updates_worker, daemon=True)
+        thread = threading.Thread(target=self._check_for_updates_worker, args=(manual,), daemon=True)
         thread.start()
 
-    def _check_for_updates_worker(self) -> None:
+    def _check_for_updates_worker(self, manual: bool) -> None:
         try:
             request = urllib.request.Request(
                 GITHUB_LATEST_RELEASE_API,
@@ -396,14 +404,16 @@ class DashboardWindow(QMainWindow):
                 release = json.loads(response.read().decode("utf-8", errors="replace"))
             latest_tag = str(release.get("tag_name", "")).strip()
             if not latest_tag or not self._is_newer_version(latest_tag, APP_VERSION):
+                if manual:
+                    self.signals.update_current.emit(latest_tag or f"v{APP_VERSION}")
                 return
             asset_url = self._release_asset_url(release)
             if not asset_url:
-                self.signals.update_failed.emit(f"新版 {latest_tag} 沒有找到 {RELEASE_ASSET_NAME}。")
+                self.signals.update_failed.emit(f"新版 {latest_tag} 沒有找到 {RELEASE_ASSET_NAME}。", manual)
                 return
-            self.signals.update_available.emit({"tag": latest_tag, "asset_url": asset_url})
+            self.signals.update_available.emit({"tag": latest_tag, "asset_url": asset_url, "manual": manual})
         except Exception as exc:
-            self.signals.update_failed.emit(f"檢查更新失敗：{exc}")
+            self.signals.update_failed.emit(f"檢查更新失敗：{exc}", manual)
         finally:
             self.update_checking = False
 
@@ -449,6 +459,13 @@ class DashboardWindow(QMainWindow):
         thread = threading.Thread(target=self._download_update_worker, args=(info,), daemon=True)
         thread.start()
 
+    def _handle_update_current(self, latest_tag: str) -> None:
+        QMessageBox.information(
+            self,
+            "檢查更新",
+            f"目前已是最新版。\n\n目前版本：v{APP_VERSION}\nGitHub 最新版：{latest_tag}",
+        )
+
     def _download_update_worker(self, info: Dict) -> None:
         tag = str(info.get("tag", "")).strip()
         asset_url = str(info.get("asset_url", "")).strip()
@@ -466,7 +483,7 @@ class DashboardWindow(QMainWindow):
                     output.write(chunk)
             self.signals.update_downloaded.emit(str(target), tag)
         except Exception as exc:
-            self.signals.update_failed.emit(f"下載更新失敗：{exc}")
+            self.signals.update_failed.emit(f"下載更新失敗：{exc}", True)
 
     def _handle_update_downloaded(self, downloaded_path: str, tag: str) -> None:
         source = Path(downloaded_path)
@@ -514,7 +531,10 @@ class DashboardWindow(QMainWindow):
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(["cmd", "/c", str(updater)], creationflags=creationflags)
 
-    def _handle_update_failed(self, message: str) -> None:
+    def _handle_update_failed(self, message: str, manual: bool) -> None:
+        if manual:
+            QMessageBox.warning(self, "檢查更新", message)
+            return
         print(message)
 
     def _selected_task(self) -> Optional[MonitorTask]:

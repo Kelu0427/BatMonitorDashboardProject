@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -231,6 +232,7 @@ class AppSettingsDialog(QDialog):
         interval_minutes: int,
         status_title: str,
         open_config_callback,
+        check_update_callback,
     ):
         super().__init__(parent)
         self.setWindowTitle("設定")
@@ -238,6 +240,7 @@ class AppSettingsDialog(QDialog):
         self.resize(660, 370)
         self.result_settings: Optional[Dict] = None
         self.open_config_callback = open_config_callback
+        self.check_update_callback = check_update_callback
 
         self.restart_enabled_check = QCheckBox("每日定時全部重啟")
         self.restart_enabled_check.setChecked(restart_enabled)
@@ -268,15 +271,34 @@ class AppSettingsDialog(QDialog):
 
         config_btn = QPushButton("開啟設定檔位置")
         config_btn.clicked.connect(self.open_config_callback)
+        check_update_btn = QPushButton("立即檢查更新")
+        check_update_btn.clicked.connect(self.check_update_callback)
 
         tabs = QTabWidget()
 
         general_tab = QWidget()
-        general_form = QFormLayout(general_tab)
-        general_form.addRow("", self.restart_enabled_check)
-        general_form.addRow("重啟時間", self.restart_time_edit)
-        general_form.addRow("", self.auto_update_enabled_check)
-        general_form.addRow("設定檔", config_btn)
+        general_layout = QVBoxLayout(general_tab)
+        general_layout.setContentsMargins(10, 10, 10, 10)
+        general_layout.setSpacing(10)
+
+        schedule_group = QGroupBox("啟動與排程")
+        schedule_form = QFormLayout(schedule_group)
+        schedule_form.addRow("", self.restart_enabled_check)
+        schedule_form.addRow("重啟時間", self.restart_time_edit)
+
+        update_group = QGroupBox("更新")
+        update_form = QFormLayout(update_group)
+        update_form.addRow("", self.auto_update_enabled_check)
+        update_form.addRow("手動更新", check_update_btn)
+
+        config_group = QGroupBox("設定檔")
+        config_form = QFormLayout(config_group)
+        config_form.addRow("位置", config_btn)
+
+        general_layout.addWidget(schedule_group)
+        general_layout.addWidget(update_group)
+        general_layout.addWidget(config_group)
+        general_layout.addStretch(1)
         tabs.addTab(general_tab, "一般")
 
         log_tab = QWidget()
