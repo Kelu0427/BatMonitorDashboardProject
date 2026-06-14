@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMdiArea,
     QMdiSubWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSplitter,
     QTimeEdit,
@@ -61,6 +62,7 @@ class DashboardSignals(QObject):
     discord_message_id_changed = Signal(str)
     update_available = Signal(object)
     update_current = Signal(str)
+    update_progress = Signal(object)
     update_downloaded = Signal(str, str)
     update_failed = Signal(str, bool)
 
@@ -77,6 +79,7 @@ class DashboardWindow(QMainWindow):
         self.auto_update_enabled = True
         self.update_checking = False
         self.updating_now = False
+        self.update_progress_dialog: Optional[QProgressDialog] = None
         self.log_memory_enabled = True
         self.log_max_mb = DEFAULT_LOG_MAX_MB
         self.discord_enabled = False
@@ -91,6 +94,7 @@ class DashboardWindow(QMainWindow):
         self.signals.discord_message_id_changed.connect(self._store_discord_message_id)
         self.signals.update_available.connect(self._handle_update_available)
         self.signals.update_current.connect(self._handle_update_current)
+        self.signals.update_progress.connect(self._handle_update_progress)
         self.signals.update_downloaded.connect(self._handle_update_downloaded)
         self.signals.update_failed.connect(self._handle_update_failed)
 
@@ -456,6 +460,7 @@ class DashboardWindow(QMainWindow):
         )
         if result != QMessageBox.Yes:
             return
+        self._show_update_progress(tag)
         thread = threading.Thread(target=self._download_update_worker, args=(info,), daemon=True)
         thread.start()
 
@@ -476,16 +481,60 @@ class DashboardWindow(QMainWindow):
                 headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
             )
             with urllib.request.urlopen(request, timeout=60) as response, target.open("wb") as output:
+                total = int(response.headers.get("Content-Length") or "0")
+                downloaded = 0
+                self.signals.update_progress.emit({"downloaded": downloaded, "total": total, "tag": tag})
                 while True:
                     chunk = response.read(1024 * 256)
                     if not chunk:
                         break
                     output.write(chunk)
+                    downloaded += len(chunk)
+                    self.signals.update_progress.emit({"downloaded": downloaded, "total": total, "tag": tag})
             self.signals.update_downloaded.emit(str(target), tag)
         except Exception as exc:
             self.signals.update_failed.emit(f"下載更新失敗：{exc}", True)
 
+    def _show_update_progress(self, tag: str) -> None:
+        if self.update_progress_dialog:
+            self.update_progress_dialog.close()
+        dialog = QProgressDialog(f"正在下載 {tag}...", "", 0, 100, self)
+        dialog.setWindowTitle("下載更新")
+        dialog.setCancelButton(None)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        self.update_progress_dialog = dialog
+        dialog.show()
+
+    def _close_update_progress(self) -> None:
+        if not self.update_progress_dialog:
+            return
+        self.update_progress_dialog.close()
+        self.update_progress_dialog.deleteLater()
+        self.update_progress_dialog = None
+
+    def _handle_update_progress(self, progress: Dict) -> None:
+        dialog = self.update_progress_dialog
+        if not dialog:
+            return
+        downloaded = int(progress.get("downloaded", 0))
+        total = int(progress.get("total", 0))
+        tag = str(progress.get("tag", "")).strip()
+        downloaded_mb = downloaded / (1024 * 1024)
+        if total > 0:
+            percent = max(0, min(100, int(downloaded * 100 / total)))
+            total_mb = total / (1024 * 1024)
+            dialog.setRange(0, 100)
+            dialog.setValue(percent)
+            dialog.setLabelText(f"正在下載 {tag}... {percent}%\n{downloaded_mb:.1f} / {total_mb:.1f} MB")
+            return
+        dialog.setRange(0, 0)
+        dialog.setLabelText(f"正在下載 {tag}...\n已下載 {downloaded_mb:.1f} MB")
+
     def _handle_update_downloaded(self, downloaded_path: str, tag: str) -> None:
+        self._close_update_progress()
         source = Path(downloaded_path)
         if not source.exists():
             QMessageBox.warning(self, "更新失敗", "更新檔下載完成後找不到檔案。")
@@ -524,6 +573,8 @@ class DashboardWindow(QMainWindow):
             "  timeout /t 1 /nobreak >nul\n"
             "  goto retry\n"
             ")\n"
+            "timeout /t 2 /nobreak >nul\n"
+            "set PYINSTALLER_RESET_ENVIRONMENT=1\n"
             f'start "" "{target}"\n'
             'del "%~f0"\n'
         )
@@ -532,6 +583,7 @@ class DashboardWindow(QMainWindow):
         subprocess.Popen(["cmd", "/c", str(updater)], creationflags=creationflags)
 
     def _handle_update_failed(self, message: str, manual: bool) -> None:
+        self._close_update_progress()
         if manual:
             QMessageBox.warning(self, "檢查更新", message)
             return
