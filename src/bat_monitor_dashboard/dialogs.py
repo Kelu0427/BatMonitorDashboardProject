@@ -282,16 +282,19 @@ class AppSettingsDialog(QDialog):
         general_layout.setSpacing(10)
 
         schedule_group = QGroupBox("啟動與排程")
+        schedule_group.setObjectName("settingsSection")
         schedule_form = QFormLayout(schedule_group)
         schedule_form.addRow("", self.restart_enabled_check)
         schedule_form.addRow("重啟時間", self.restart_time_edit)
 
         update_group = QGroupBox("更新")
+        update_group.setObjectName("settingsSection")
         update_form = QFormLayout(update_group)
         update_form.addRow("", self.auto_update_enabled_check)
         update_form.addRow("手動更新", check_update_btn)
 
         config_group = QGroupBox("設定檔")
+        config_group.setObjectName("settingsSection")
         config_form = QFormLayout(config_group)
         config_form.addRow("位置", config_btn)
 

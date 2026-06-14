@@ -1089,6 +1089,9 @@ class DashboardWindow(QMainWindow):
                 font-family: "Microsoft JhengHei UI", "Microsoft JhengHei", "Segoe UI";
                 font-size: 10pt;
             }
+            QLabel, QCheckBox {
+                background: transparent;
+            }
             QToolBar {
                 background: #171b21;
                 border: 0;
@@ -1106,7 +1109,19 @@ class DashboardWindow(QMainWindow):
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 4px;
+                background: transparent;
                 color: #8bd3ff;
+            }
+            QGroupBox#settingsSection {
+                background: transparent;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding: 8px;
+            }
+            QGroupBox#settingsSection::title {
+                background: transparent;
+                color: #e6edf3;
             }
             QLabel#metricValue {
                 color: #b7f7c1;
