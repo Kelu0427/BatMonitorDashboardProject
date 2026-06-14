@@ -6,6 +6,10 @@
 
 **BAT 監控儀表板** 是一個 Windows 桌面工具，用來集中監控多個 `.bat` 任務。它可以即時顯示輸出、管理每個任務面板的位置與大小、監控主機狀態，並透過 Discord Webhook 更新同一則狀態訊息，避免洗版。
 
+## 示範影片
+
+[觀看示範影片](https://github.com/Kelu0427/BatMonitorDashboardProject/releases/download/v0.2.3/batmonitor-promo.mp4)
+
 ## 功能亮點
 
 - 多任務 BAT 監控：新增、編輯、刪除、啟動、停止、重啟。

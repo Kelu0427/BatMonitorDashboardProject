@@ -6,6 +6,10 @@
 
 **BAT Monitor Dashboard** is a Windows desktop dashboard for supervising multiple `.bat` jobs in one place. It captures live terminal output, keeps each task in a movable panel, monitors host health, and can update a single Discord Webhook status message without spamming the channel.
 
+## Demo Video
+
+[Watch the demo video](https://github.com/Kelu0427/BatMonitorDashboardProject/releases/download/v0.2.3/batmonitor-promo.mp4)
+
 ## Highlights
 
 - Multi-BAT supervision: add, edit, delete, start, stop, and restart tasks.
