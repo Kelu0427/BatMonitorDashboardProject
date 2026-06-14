@@ -2,6 +2,8 @@ import json
 import platform
 import socket
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -12,8 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import psutil
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QRect, Qt, QTime, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPen
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QRect, QSize, Qt, QTime, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -31,16 +33,23 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTimeEdit,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .constants import (
     APP_NAME,
+    APP_VERSION,
     DEFAULT_GEOMETRY,
+    DEFAULT_LOG_MAX_MB,
     DISCORD_CHART_TITLE,
     DISCORD_FOOTER_TEXT,
     DISCORD_STATUS_TITLE,
+    GITHUB_LATEST_RELEASE_API,
+    GITHUB_REPOSITORY_URL,
+    RELEASE_ASSET_NAME,
+    resource_path,
     user_config_path,
 )
 from .dialogs import AppSettingsDialog, DiscordSettingsDialog, TaskDialog
@@ -50,6 +59,9 @@ from .panel import MonitorPanel
 
 class DashboardSignals(QObject):
     discord_message_id_changed = Signal(str)
+    update_available = Signal(object)
+    update_downloaded = Signal(str, str)
+    update_failed = Signal(str)
 
 
 class DashboardWindow(QMainWindow):
@@ -61,6 +73,11 @@ class DashboardWindow(QMainWindow):
         self.windows: Dict[str, QMdiSubWindow] = {}
         self.last_restart_key = ""
         self.sidebar_collapsed = False
+        self.auto_update_enabled = True
+        self.update_checking = False
+        self.updating_now = False
+        self.log_memory_enabled = True
+        self.log_max_mb = DEFAULT_LOG_MAX_MB
         self.discord_enabled = False
         self.discord_status_title = DISCORD_STATUS_TITLE
         self.discord_webhook_url = ""
@@ -71,6 +88,9 @@ class DashboardWindow(QMainWindow):
         self.latest_metrics: Dict = {}
         self.signals = DashboardSignals()
         self.signals.discord_message_id_changed.connect(self._store_discord_message_id)
+        self.signals.update_available.connect(self._handle_update_available)
+        self.signals.update_downloaded.connect(self._handle_update_downloaded)
+        self.signals.update_failed.connect(self._handle_update_failed)
 
         self.setWindowTitle("BAT 監控儀表板")
         self.resize(1280, 760)
@@ -79,6 +99,7 @@ class DashboardWindow(QMainWindow):
         self.task_list.setMinimumWidth(0)
         self.task_list.setFixedWidth(230)
         self.task_list.currentItemChanged.connect(self._focus_selected_panel)
+        self.sidebar_panel = self._build_sidebar()
 
         self.mdi = QMdiArea()
         self.mdi.setViewMode(QMdiArea.SubWindowView)
@@ -92,10 +113,11 @@ class DashboardWindow(QMainWindow):
         right_layout.addWidget(self.mdi, 1)
 
         splitter = QSplitter()
-        splitter.addWidget(self.task_list)
+        splitter.addWidget(self.sidebar_panel)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+
         self.setCentralWidget(splitter)
 
         self.restart_enabled = QCheckBox("每日定時全部重啟")
@@ -121,6 +143,8 @@ class DashboardWindow(QMainWindow):
         self.metrics_timer.timeout.connect(self._update_metrics)
         self.metrics_timer.start(5000)
         self._update_metrics()
+        if self.auto_update_enabled:
+            QTimer.singleShot(2500, self.check_for_updates)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("工具列")
@@ -153,6 +177,9 @@ class DashboardWindow(QMainWindow):
             self,
             self.restart_enabled.isChecked(),
             self.restart_time.time(),
+            self.auto_update_enabled,
+            self.log_memory_enabled,
+            self.log_max_mb,
             self.discord_enabled,
             self.discord_webhook_url,
             self.discord_interval_minutes,
@@ -163,6 +190,15 @@ class DashboardWindow(QMainWindow):
             old_webhook_url = self.discord_webhook_url
             self.restart_enabled.setChecked(dialog.result_settings["restart_enabled"])
             self.restart_time.setTime(dialog.result_settings["restart_time"])
+            old_auto_update_enabled = self.auto_update_enabled
+            self.auto_update_enabled = dialog.result_settings["auto_update_enabled"]
+            self.log_memory_enabled = dialog.result_settings["log_memory_enabled"]
+            self.log_max_mb = dialog.result_settings["log_max_mb"]
+            for task in self.tasks:
+                task.log_max_mb = self.log_max_mb
+            for panel in self.panels.values():
+                panel.task.log_max_mb = self.log_max_mb
+                panel.set_log_memory_enabled(self.log_memory_enabled)
             self.discord_enabled = dialog.result_settings["discord_enabled"]
             self.discord_status_title = dialog.result_settings["status_title"]
             self.discord_webhook_url = dialog.result_settings["webhook_url"]
@@ -171,6 +207,8 @@ class DashboardWindow(QMainWindow):
                 self.discord_message_id = ""
             self.last_discord_sent_at = 0.0
             self.save_config()
+            if self.auto_update_enabled and not old_auto_update_enabled:
+                self.check_for_updates()
             self._update_metrics(force_discord=True)
 
     def _build_metrics_box(self) -> QGroupBox:
@@ -197,6 +235,42 @@ class DashboardWindow(QMainWindow):
             grid.addWidget(title_label, row, col)
             grid.addWidget(value_label, row, col + 1)
         return box
+
+    def _build_sidebar(self) -> QWidget:
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.task_list, 1)
+        layout.addWidget(self._build_sidebar_footer())
+        sidebar.setFixedWidth(230)
+        return sidebar
+
+    def _build_sidebar_footer(self) -> QWidget:
+        footer = QWidget()
+        footer.setObjectName("sidebarFooter")
+        layout = QHBoxLayout(footer)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(6)
+
+        version_label = QLabel(f"v{APP_VERSION}")
+        version_label.setObjectName("footerText")
+
+        github_btn = QToolButton()
+        github_btn.setObjectName("footerGitHubButton")
+        github_icon = QIcon(str(resource_path("assets/github-mark.png")))
+        if not github_icon.isNull():
+            github_btn.setIcon(github_icon)
+        github_btn.setIconSize(QSize(18, 18))
+        github_btn.setAutoRaise(True)
+        github_btn.setToolTip("開啟 GitHub 專案")
+        github_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPOSITORY_URL)))
+
+        layout.addWidget(version_label)
+        layout.addStretch(1)
+        layout.addWidget(github_btn)
+        return footer
 
     def edit_discord_settings(self) -> None:
         dialog = DiscordSettingsDialog(
@@ -225,18 +299,19 @@ class DashboardWindow(QMainWindow):
 
     def _apply_sidebar_state(self) -> None:
         if self.sidebar_collapsed:
-            self.task_list.setVisible(False)
+            self.sidebar_panel.setVisible(False)
             if hasattr(self, "sidebar_action"):
                 self.sidebar_action.setText("展開側欄")
         else:
-            self.task_list.setVisible(True)
-            self.task_list.setFixedWidth(230)
+            self.sidebar_panel.setVisible(True)
+            self.sidebar_panel.setFixedWidth(230)
             if hasattr(self, "sidebar_action"):
                 self.sidebar_action.setText("收合側欄")
 
     def add_task(self) -> None:
         dialog = TaskDialog(self)
         if dialog.exec() == QDialog.Accepted and dialog.result_task:
+            dialog.result_task.log_max_mb = self.log_max_mb
             self.tasks.append(dialog.result_task)
             self._refresh_task_list()
             self._create_panel(dialog.result_task)
@@ -304,6 +379,144 @@ class DashboardWindow(QMainWindow):
         else:
             subprocess.Popen(["explorer", str(self.config_path.parent)])
 
+    def check_for_updates(self) -> None:
+        if self.update_checking:
+            return
+        self.update_checking = True
+        thread = threading.Thread(target=self._check_for_updates_worker, daemon=True)
+        thread.start()
+
+    def _check_for_updates_worker(self) -> None:
+        try:
+            request = urllib.request.Request(
+                GITHUB_LATEST_RELEASE_API,
+                headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+            )
+            with urllib.request.urlopen(request, timeout=12) as response:
+                release = json.loads(response.read().decode("utf-8", errors="replace"))
+            latest_tag = str(release.get("tag_name", "")).strip()
+            if not latest_tag or not self._is_newer_version(latest_tag, APP_VERSION):
+                return
+            asset_url = self._release_asset_url(release)
+            if not asset_url:
+                self.signals.update_failed.emit(f"新版 {latest_tag} 沒有找到 {RELEASE_ASSET_NAME}。")
+                return
+            self.signals.update_available.emit({"tag": latest_tag, "asset_url": asset_url})
+        except Exception as exc:
+            self.signals.update_failed.emit(f"檢查更新失敗：{exc}")
+        finally:
+            self.update_checking = False
+
+    def _release_asset_url(self, release: Dict) -> str:
+        for asset in release.get("assets", []):
+            if str(asset.get("name", "")).lower() == RELEASE_ASSET_NAME.lower():
+                return str(asset.get("browser_download_url", ""))
+        for asset in release.get("assets", []):
+            name = str(asset.get("name", "")).lower()
+            if name.endswith(".exe"):
+                return str(asset.get("browser_download_url", ""))
+        return ""
+
+    def _is_newer_version(self, latest: str, current: str) -> bool:
+        return self._version_tuple(latest) > self._version_tuple(current)
+
+    def _version_tuple(self, value: str) -> tuple[int, ...]:
+        text = value.strip().lstrip("vV")
+        parts = []
+        for part in text.split("."):
+            digits = ""
+            for char in part:
+                if char.isdigit():
+                    digits += char
+                else:
+                    break
+            parts.append(int(digits or "0"))
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts)
+
+    def _handle_update_available(self, info: Dict) -> None:
+        tag = str(info.get("tag", "")).strip()
+        result = QMessageBox.question(
+            self,
+            "發現新版本",
+            f"目前版本：v{APP_VERSION}\n最新版本：{tag}\n\n是否立即下載並安裝？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if result != QMessageBox.Yes:
+            return
+        thread = threading.Thread(target=self._download_update_worker, args=(info,), daemon=True)
+        thread.start()
+
+    def _download_update_worker(self, info: Dict) -> None:
+        tag = str(info.get("tag", "")).strip()
+        asset_url = str(info.get("asset_url", "")).strip()
+        try:
+            target = Path(tempfile.gettempdir()) / f"{APP_NAME}-{tag}-{RELEASE_ASSET_NAME}"
+            request = urllib.request.Request(
+                asset_url,
+                headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+            )
+            with urllib.request.urlopen(request, timeout=60) as response, target.open("wb") as output:
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+            self.signals.update_downloaded.emit(str(target), tag)
+        except Exception as exc:
+            self.signals.update_failed.emit(f"下載更新失敗：{exc}")
+
+    def _handle_update_downloaded(self, downloaded_path: str, tag: str) -> None:
+        source = Path(downloaded_path)
+        if not source.exists():
+            QMessageBox.warning(self, "更新失敗", "更新檔下載完成後找不到檔案。")
+            return
+        if getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self,
+                "準備更新",
+                "更新檔已下載完成。\n按下確定後，程式會關閉、替換檔案並重新啟動。",
+            )
+            self.updating_now = True
+            self._launch_updater(source, Path(sys.executable))
+            self.close()
+            return
+
+        dist_dir = Path.cwd() / "dist"
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        target = dist_dir / RELEASE_ASSET_NAME
+        source.replace(target)
+        QMessageBox.information(
+            self,
+            "更新已下載",
+            f"目前是原始碼執行模式，無法替換正在執行的 Python。\n\n"
+            f"已將 {tag} 下載到：\n{target}",
+        )
+
+    def _launch_updater(self, source: Path, target: Path) -> None:
+        updater = Path(tempfile.gettempdir()) / f"{APP_NAME}-update.bat"
+        script = (
+            "@echo off\n"
+            "setlocal\n"
+            "timeout /t 2 /nobreak >nul\n"
+            ":retry\n"
+            f'move /Y "{source}" "{target}" >nul\n'
+            "if errorlevel 1 (\n"
+            "  timeout /t 1 /nobreak >nul\n"
+            "  goto retry\n"
+            ")\n"
+            f'start "" "{target}"\n'
+            'del "%~f0"\n'
+        )
+        updater.write_text(script, encoding="utf-8")
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(["cmd", "/c", str(updater)], creationflags=creationflags)
+
+    def _handle_update_failed(self, message: str) -> None:
+        print(message)
+
     def _selected_task(self) -> Optional[MonitorTask]:
         item = self.task_list.currentItem()
         if not item:
@@ -340,13 +553,13 @@ class DashboardWindow(QMainWindow):
             self._create_panel(task)
 
     def _create_panel(self, task: MonitorTask) -> None:
-        panel = MonitorPanel(task, edit_callback=self.edit_task_by_id)
+        panel = MonitorPanel(task, edit_callback=self.edit_task_by_id, log_memory_enabled=self.log_memory_enabled)
         window = QMdiSubWindow()
         window.setWidget(panel)
         window.setWindowTitle(task.name)
         window.setAttribute(Qt.WA_DeleteOnClose, False)
         self.mdi.addSubWindow(window)
-        window.setGeometry(self._bounded_rect(task.geometry))
+        window.setGeometry(self._geometry_rect(task.geometry))
         window.show()
         self.panels[task.task_id] = panel
         self.windows[task.task_id] = window
@@ -354,6 +567,7 @@ class DashboardWindow(QMainWindow):
     def _rebuild_panel(self, task: MonitorTask) -> None:
         old_panel = self.panels.get(task.task_id)
         if old_panel:
+            old_panel.flush_log()
             old_panel.stop()
         old_window = self.windows.get(task.task_id)
         if old_window:
@@ -373,14 +587,20 @@ class DashboardWindow(QMainWindow):
             window = self.windows.get(task.task_id)
             if not window:
                 continue
-            rect = self._bounded_rect({
+            task.geometry = {
                 "x": window.x(),
                 "y": window.y(),
-                "w": window.width(),
-                "h": window.height(),
-            })
-            window.setGeometry(rect)
-            task.geometry = self._rect_to_geometry(rect)
+                "w": max(280, window.width()),
+                "h": max(180, window.height()),
+            }
+
+    def _geometry_rect(self, geometry: Dict[str, int]) -> QRect:
+        return QRect(
+            int(geometry.get("x", DEFAULT_GEOMETRY["x"])),
+            int(geometry.get("y", DEFAULT_GEOMETRY["y"])),
+            max(280, int(geometry.get("w", DEFAULT_GEOMETRY["w"]))),
+            max(180, int(geometry.get("h", DEFAULT_GEOMETRY["h"]))),
+        )
 
     def _bounded_rect(self, geometry: Dict[str, int]) -> QRect:
         area = self.mdi.viewport().rect()
@@ -774,6 +994,9 @@ class DashboardWindow(QMainWindow):
             settings = data.get("settings", {})
             self.restart_enabled.setChecked(bool(settings.get("restart_enabled", False)))
             self.sidebar_collapsed = bool(settings.get("sidebar_collapsed", False))
+            self.auto_update_enabled = bool(settings.get("auto_update_enabled", True))
+            self.log_memory_enabled = bool(settings.get("log_memory_enabled", True))
+            self.log_max_mb = max(1, int(settings.get("log_max_mb", DEFAULT_LOG_MAX_MB)))
             self.discord_enabled = bool(settings.get("discord_enabled", False))
             self.discord_status_title = str(settings.get("discord_status_title", DISCORD_STATUS_TITLE)).strip() or DISCORD_STATUS_TITLE
             self.discord_webhook_url = str(settings.get("discord_webhook_url", ""))
@@ -800,6 +1023,9 @@ class DashboardWindow(QMainWindow):
                 "restart_enabled": self.restart_enabled.isChecked(),
                 "restart_time": self.restart_time.time().toString("HH:mm"),
                 "sidebar_collapsed": self.sidebar_collapsed,
+                "auto_update_enabled": self.auto_update_enabled,
+                "log_memory_enabled": self.log_memory_enabled,
+                "log_max_mb": self.log_max_mb,
                 "discord_enabled": self.discord_enabled,
                 "discord_status_title": self.discord_status_title,
                 "discord_webhook_url": self.discord_webhook_url,
@@ -812,9 +1038,26 @@ class DashboardWindow(QMainWindow):
         self.config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def closeEvent(self, event) -> None:
+        running_count = sum(1 for panel in self.panels.values() if panel.is_running())
+        if running_count and not self.log_memory_enabled and not self.updating_now:
+            result = QMessageBox.warning(
+                self,
+                "Log 記憶功能未啟用",
+                "目前有任務正在執行，且尚未啟用 Log 記憶功能。\n\n"
+                "關閉程式會中斷所有進行中的任務；下次開啟時，設定為自動啟動的任務會重新啟動。\n\n"
+                "確定要關閉嗎？",
+                QMessageBox.Ok | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if result != QMessageBox.Ok:
+                event.ignore()
+                return
         self.save_config()
         for panel in self.panels.values():
-            panel.stop()
+            panel.flush_log()
+            if not self.log_memory_enabled:
+                panel.stop(wait=True)
+                panel.flush_log()
         event.accept()
 
     def _apply_dark_style(self) -> None:
@@ -891,6 +1134,44 @@ class DashboardWindow(QMainWindow):
             }
             QCheckBox {
                 spacing: 6px;
+            }
+            QTabWidget::pane {
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                background: #151a20;
+            }
+            QTabBar::tab {
+                background: #26313d;
+                color: #e6edf3;
+                border: 1px solid #3a4654;
+                padding: 7px 14px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #1f6feb;
+            }
+            QLabel#aboutName {
+                color: #f4fbff;
+                font-size: 16pt;
+                font-weight: 700;
+            }
+            QWidget#sidebarFooter {
+                background: transparent;
+            }
+            QLabel#footerText {
+                color: #9fb0bf;
+                font-size: 9pt;
+            }
+            QToolButton#footerGitHubButton {
+                background: transparent;
+                border: 0;
+                padding: 2px;
+                min-width: 22px;
+                min-height: 22px;
+            }
+            QToolButton#footerGitHubButton:hover {
+                background: #26313d;
+                border-radius: 4px;
             }
             """
         )

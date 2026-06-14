@@ -1,25 +1,46 @@
 from pathlib import Path
 from typing import Dict, Optional
 
-from PySide6.QtCore import QTime
+from PySide6.QtCore import QTime, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from .constants import DEFAULT_GEOMETRY, DISCORD_STATUS_TITLE, task_id
+from .constants import (
+    APP_VERSION,
+    DEFAULT_GEOMETRY,
+    DEFAULT_LOG_MAX_MB,
+    DISCORD_STATUS_TITLE,
+    GITHUB_PROFILE_URL,
+    GITHUB_REPOSITORY_URL,
+    resource_path,
+    task_id,
+)
 from .models import MonitorTask
+
+
+def build_spin_row(spin: QSpinBox) -> QHBoxLayout:
+    spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+    row = QHBoxLayout()
+    row.addWidget(spin)
+    row.addStretch(1)
+    return row
 
 
 class TaskDialog(QDialog):
@@ -27,7 +48,7 @@ class TaskDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("編輯監控任務")
         self.setModal(True)
-        self.resize(560, 220)
+        self.resize(560, 260)
         self.result_task: Optional[MonitorTask] = None
         self.original_task = task
 
@@ -41,16 +62,14 @@ class TaskDialog(QDialog):
         self.max_lines_spin.setSingleStep(500)
         self.max_lines_spin.setValue(task.max_lines if task else 3000)
         self.max_lines_spin.setMinimumWidth(110)
-        max_lines_minus_btn = QPushButton("-500")
-        max_lines_plus_btn = QPushButton("+500")
-        max_lines_minus_btn.clicked.connect(lambda: self._adjust_max_lines(-500))
-        max_lines_plus_btn.clicked.connect(lambda: self._adjust_max_lines(500))
-
-        max_lines_row = QHBoxLayout()
-        max_lines_row.addWidget(self.max_lines_spin)
-        max_lines_row.addWidget(max_lines_minus_btn)
-        max_lines_row.addWidget(max_lines_plus_btn)
-        max_lines_row.addStretch(1)
+        self.log_max_mb_spin = QSpinBox()
+        self.log_max_mb_spin.setRange(1, 1024)
+        self.log_max_mb_spin.setSingleStep(5)
+        self.log_max_mb_spin.setValue(task.log_max_mb if task else DEFAULT_LOG_MAX_MB)
+        self.log_max_mb_spin.setSuffix(" MB")
+        self.log_max_mb_spin.setMinimumWidth(110)
+        max_lines_row = build_spin_row(self.max_lines_spin)
+        log_max_mb_row = build_spin_row(self.log_max_mb_spin)
 
         self.encoding_combo = QComboBox()
         self.encoding_combo.addItems(["utf-8", "cp950", "big5", "系統預設"])
@@ -77,6 +96,7 @@ class TaskDialog(QDialog):
         form.addRow("BAT 路徑", bat_row)
         form.addRow("工作目錄", workdir_row)
         form.addRow("保留最近行數", max_lines_row)
+        form.addRow("Log 檔案上限", log_max_mb_row)
         form.addRow("輸出編碼", self.encoding_combo)
         form.addRow("", self.auto_start_check)
 
@@ -93,9 +113,6 @@ class TaskDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(buttons)
-
-    def _adjust_max_lines(self, delta: int) -> None:
-        self.max_lines_spin.setValue(self.max_lines_spin.value() + delta)
 
     def _browse_bat(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "選擇 BAT 檔案", "", "Batch 檔 (*.bat);;所有檔案 (*.*)")
@@ -136,6 +153,7 @@ class TaskDialog(QDialog):
             workdir=workdir,
             auto_start=self.auto_start_check.isChecked(),
             max_lines=self.max_lines_spin.value(),
+            log_max_mb=self.log_max_mb_spin.value(),
             output_encoding=self.encoding_combo.currentText(),
             geometry=geometry,
         )
@@ -160,17 +178,17 @@ class DiscordSettingsDialog(QDialog):
         self.enabled_check.setChecked(enabled)
         self.status_title_edit = QLineEdit(status_title or DISCORD_STATUS_TITLE)
         self.webhook_edit = QLineEdit(webhook_url)
-        self.webhook_edit.setEchoMode(QLineEdit.Password)
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(1, 1440)
         self.interval_spin.setValue(max(1, interval_minutes))
         self.interval_spin.setSuffix(" 分鐘")
+        interval_row = build_spin_row(self.interval_spin)
 
         form = QFormLayout()
         form.addRow("", self.enabled_check)
         form.addRow("通知標題", self.status_title_edit)
         form.addRow("Webhook URL", self.webhook_edit)
-        form.addRow("回傳間隔", self.interval_spin)
+        form.addRow("回傳間隔", interval_row)
 
         save_btn = QPushButton("儲存")
         save_btn.clicked.connect(self._save)
@@ -205,6 +223,9 @@ class AppSettingsDialog(QDialog):
         parent: QWidget,
         restart_enabled: bool,
         restart_time: QTime,
+        auto_update_enabled: bool,
+        log_memory_enabled: bool,
+        log_max_mb: int,
         discord_enabled: bool,
         webhook_url: str,
         interval_minutes: int,
@@ -214,37 +235,65 @@ class AppSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("設定")
         self.setModal(True)
-        self.resize(660, 300)
+        self.resize(660, 370)
         self.result_settings: Optional[Dict] = None
         self.open_config_callback = open_config_callback
 
         self.restart_enabled_check = QCheckBox("每日定時全部重啟")
         self.restart_enabled_check.setChecked(restart_enabled)
         self.restart_time_edit = QTimeEdit()
+        self.restart_time_edit.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.restart_time_edit.setDisplayFormat("HH:mm")
         self.restart_time_edit.setTime(restart_time)
+        self.auto_update_enabled_check = QCheckBox("自動檢查更新")
+        self.auto_update_enabled_check.setChecked(auto_update_enabled)
+        self.log_memory_enabled_check = QCheckBox("啟用 Log 記憶功能")
+        self.log_memory_enabled_check.setChecked(log_memory_enabled)
+        self.log_max_mb_spin = QSpinBox()
+        self.log_max_mb_spin.setRange(1, 1024)
+        self.log_max_mb_spin.setSingleStep(5)
+        self.log_max_mb_spin.setValue(max(1, log_max_mb))
+        self.log_max_mb_spin.setSuffix(" MB")
+        log_max_mb_row = build_spin_row(self.log_max_mb_spin)
 
         self.discord_enabled_check = QCheckBox("啟用 Discord 狀態更新")
         self.discord_enabled_check.setChecked(discord_enabled)
         self.status_title_edit = QLineEdit(status_title or DISCORD_STATUS_TITLE)
         self.webhook_edit = QLineEdit(webhook_url)
-        self.webhook_edit.setEchoMode(QLineEdit.Password)
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(1, 1440)
         self.interval_spin.setValue(max(1, interval_minutes))
         self.interval_spin.setSuffix(" 分鐘")
+        interval_row = build_spin_row(self.interval_spin)
 
         config_btn = QPushButton("開啟設定檔位置")
         config_btn.clicked.connect(self.open_config_callback)
 
-        form = QFormLayout()
-        form.addRow("", self.restart_enabled_check)
-        form.addRow("重啟時間", self.restart_time_edit)
-        form.addRow("", self.discord_enabled_check)
-        form.addRow("Discord 通知標題", self.status_title_edit)
-        form.addRow("Webhook URL", self.webhook_edit)
-        form.addRow("Discord 回傳間隔", self.interval_spin)
-        form.addRow("設定檔", config_btn)
+        tabs = QTabWidget()
+
+        general_tab = QWidget()
+        general_form = QFormLayout(general_tab)
+        general_form.addRow("", self.restart_enabled_check)
+        general_form.addRow("重啟時間", self.restart_time_edit)
+        general_form.addRow("", self.auto_update_enabled_check)
+        general_form.addRow("設定檔", config_btn)
+        tabs.addTab(general_tab, "一般")
+
+        log_tab = QWidget()
+        log_form = QFormLayout(log_tab)
+        log_form.addRow("", self.log_memory_enabled_check)
+        log_form.addRow("全部任務 Log 上限", log_max_mb_row)
+        tabs.addTab(log_tab, "Log")
+
+        discord_tab = QWidget()
+        discord_form = QFormLayout(discord_tab)
+        discord_form.addRow("", self.discord_enabled_check)
+        discord_form.addRow("Discord 通知標題", self.status_title_edit)
+        discord_form.addRow("Webhook URL", self.webhook_edit)
+        discord_form.addRow("Discord 回傳間隔", interval_row)
+        tabs.addTab(discord_tab, "Discord")
+
+        tabs.addTab(self._build_about_tab(), "關於")
 
         save_btn = QPushButton("儲存")
         save_btn.clicked.connect(self._save)
@@ -257,7 +306,7 @@ class AppSettingsDialog(QDialog):
         buttons.addWidget(cancel_btn)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addWidget(tabs)
         layout.addLayout(buttons)
 
     def _save(self) -> None:
@@ -268,9 +317,73 @@ class AppSettingsDialog(QDialog):
         self.result_settings = {
             "restart_enabled": self.restart_enabled_check.isChecked(),
             "restart_time": self.restart_time_edit.time(),
+            "auto_update_enabled": self.auto_update_enabled_check.isChecked(),
+            "log_memory_enabled": self.log_memory_enabled_check.isChecked(),
+            "log_max_mb": self.log_max_mb_spin.value(),
             "discord_enabled": self.discord_enabled_check.isChecked(),
             "status_title": self.status_title_edit.text().strip() or DISCORD_STATUS_TITLE,
             "webhook_url": webhook_url,
             "interval_minutes": self.interval_spin.value(),
         }
         self.accept()
+
+    def _build_about_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        avatar_label = QLabel()
+        avatar = QPixmap(str(resource_path("assets/github-avatar.png")))
+        if not avatar.isNull():
+            avatar_label.setPixmap(self._rounded_pixmap(avatar, 112))
+        avatar_label.setAlignment(Qt.AlignCenter)
+
+        name_label = QLabel("Kelu0427")
+        name_label.setAlignment(Qt.AlignCenter)
+        name_label.setObjectName("aboutName")
+
+        version_label = QLabel(f"BAT Monitor Dashboard v{APP_VERSION}")
+        version_label.setAlignment(Qt.AlignCenter)
+
+        intro_label = QLabel(
+            "持續學習、喜歡打造有想像力工具的開發者。\n"
+            "專注於：軟體開發、自動化、介面優化，以及更好的人機互動體驗。"
+        )
+        intro_label.setWordWrap(True)
+        intro_label.setAlignment(Qt.AlignCenter)
+
+        profile_btn = QPushButton("GitHub 個人頁")
+        profile_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_PROFILE_URL)))
+        repo_btn = QPushButton("專案頁面")
+        repo_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPOSITORY_URL)))
+
+        link_row = QHBoxLayout()
+        link_row.addStretch(1)
+        link_row.addWidget(profile_btn)
+        link_row.addWidget(repo_btn)
+        link_row.addStretch(1)
+
+        layout.addStretch(1)
+        layout.addWidget(avatar_label)
+        layout.addWidget(name_label)
+        layout.addWidget(version_label)
+        layout.addWidget(intro_label)
+        layout.addLayout(link_row)
+        layout.addStretch(1)
+        return tab
+
+    def _rounded_pixmap(self, source: QPixmap, size: int) -> QPixmap:
+        scaled = source.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        x = max(0, (scaled.width() - size) // 2)
+        y = max(0, (scaled.height() - size) // 2)
+        cropped = scaled.copy(x, y, size, size)
+
+        rounded = QPixmap(size, size)
+        rounded.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(rounded)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        path = QPainterPath()
+        path.addEllipse(0, 0, size, size)
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, cropped)
+        painter.end()
+        return rounded

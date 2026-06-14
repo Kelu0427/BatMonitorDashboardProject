@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict
 
-from .constants import DEFAULT_GEOMETRY, task_id
+from .constants import DEFAULT_GEOMETRY, DEFAULT_LOG_MAX_MB, task_id
 
 
 @dataclass
@@ -13,6 +13,7 @@ class MonitorTask:
     workdir: str
     auto_start: bool
     max_lines: int
+    log_max_mb: int
     output_encoding: str
     geometry: Dict[str, int]
 
@@ -31,6 +32,7 @@ class MonitorTask:
             workdir=workdir,
             auto_start=bool(data.get("auto_start", True)),
             max_lines=max(100, int(data.get("max_lines", 3000))),
+            log_max_mb=max(1, int(data.get("log_max_mb", DEFAULT_LOG_MAX_MB))),
             output_encoding=str(data.get("output_encoding", "utf-8")).strip() or "utf-8",
             geometry={
                 "x": int(geometry.get("x", DEFAULT_GEOMETRY["x"])),
