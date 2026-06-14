@@ -1,21 +1,24 @@
 from pathlib import Path
 from typing import Dict, Optional
 
-from PySide6.QtCore import QTime, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QRect, QTime, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTabWidget,
     QTimeEdit,
@@ -218,6 +221,139 @@ class DiscordSettingsDialog(QDialog):
         }
         self.accept()
 
+
+class ThemePreview(QWidget):
+    def __init__(self, theme_name: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.theme_name = theme_name
+        self.setMinimumSize(170, 100)
+
+    def set_theme(self, theme_name: str) -> None:
+        self.theme_name = theme_name
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        palette = self._palette()
+        bg = QColor(palette["bg"])
+        panel = QColor(palette["panel"])
+        border = QColor(palette["border"])
+        accent = QColor(palette["accent"])
+        text = QColor(palette["text"])
+        muted = QColor(palette["muted"])
+
+        rect = self.rect().adjusted(6, 6, -6, -6)
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 8, 8)
+
+        header = QRect(rect.x(), rect.y(), rect.width(), 22)
+        painter.setBrush(panel)
+        painter.drawRoundedRect(header, 8, 8)
+        painter.setPen(text)
+        painter.drawText(header.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignVCenter, "主題預覽")
+
+        sidebar = QRect(rect.x() + 8, rect.y() + 32, 38, rect.height() - 42)
+        content = QRect(sidebar.right() + 8, sidebar.y(), rect.width() - sidebar.width() - 24, sidebar.height())
+        painter.setBrush(panel)
+        painter.setPen(QPen(border, 1))
+        painter.drawRoundedRect(sidebar, 5, 5)
+        painter.drawRoundedRect(content, 5, 5)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(accent)
+        painter.drawRoundedRect(QRect(sidebar.x() + 7, sidebar.y() + 8, 24, 7), 4, 4)
+        painter.setBrush(muted)
+        painter.drawRoundedRect(QRect(sidebar.x() + 7, sidebar.y() + 22, 22, 5), 3, 3)
+        painter.drawRoundedRect(QRect(sidebar.x() + 7, sidebar.y() + 34, 26, 5), 3, 3)
+
+        painter.setBrush(accent)
+        painter.drawRoundedRect(QRect(content.x() + 8, content.y() + 10, min(50, content.width() - 18), 8), 4, 4)
+        painter.setBrush(muted)
+        painter.drawRoundedRect(QRect(content.x() + 8, content.y() + 28, max(18, content.width() - 18), 6), 3, 3)
+        painter.drawRoundedRect(QRect(content.x() + 8, content.y() + 42, max(18, int(content.width() * 0.62)), 6), 3, 3)
+
+    def _palette(self) -> Dict[str, str]:
+        if self.theme_name == "light":
+            return {
+                "bg": "#f6f8fa",
+                "panel": "#ffffff",
+                "border": "#d0d7de",
+                "accent": "#0969da",
+                "text": "#1f2328",
+                "muted": "#57606a",
+            }
+        if self.theme_name == "warm":
+            return {
+                "bg": "#fff7ed",
+                "panel": "#fffbeb",
+                "border": "#fed7aa",
+                "accent": "#c2410c",
+                "text": "#431407",
+                "muted": "#a16207",
+            }
+        return {
+            "bg": "#111418",
+            "panel": "#151a20",
+            "border": "#30363d",
+            "accent": "#1f6feb",
+            "text": "#e6edf3",
+            "muted": "#9fb0bf",
+        }
+
+
+class LayoutPreview(QWidget):
+    def __init__(self, layout_mode: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.layout_mode = layout_mode
+        self.setMinimumSize(170, 96)
+
+    def set_layout_mode(self, layout_mode: str) -> None:
+        self.layout_mode = layout_mode
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        outer = self.rect().adjusted(8, 8, -8, -8)
+        painter.setPen(QPen(QColor("#30363d"), 1))
+        painter.setBrush(QColor("#0b0f14"))
+        painter.drawRoundedRect(outer, 8, 8)
+        painter.setPen(QColor("#e6edf3"))
+        painter.drawText(QRect(outer.x() + 10, outer.y(), outer.width() - 20, 24), Qt.AlignmentFlag.AlignVCenter, "版面預覽")
+
+        area = outer.adjusted(10, 32, -10, -10)
+        panels = self._panel_rects(area)
+        colors = ["#1f6feb", "#38d98b", "#f6c343", "#ff7b72"]
+        for idx, rect in enumerate(panels):
+            painter.setBrush(QColor(colors[idx % len(colors)]))
+            painter.setPen(QPen(QColor("#dbeafe"), 1))
+            painter.drawRoundedRect(rect, 5, 5)
+
+    def _panel_rects(self, area: QRect) -> list[QRect]:
+        gap = 6
+        mode = self.layout_mode
+        if mode == "vertical":
+            h = max(12, (area.height() - gap * 2) // 3)
+            return [QRect(area.x(), area.y() + i * (h + gap), area.width(), h) for i in range(3)]
+        if mode == "horizontal":
+            w = max(20, (area.width() - gap * 2) // 3)
+            return [QRect(area.x() + i * (w + gap), area.y(), w, area.height()) for i in range(3)]
+        if mode == "cascade":
+            w = int(area.width() * 0.62)
+            h = int(area.height() * 0.58)
+            return [QRect(area.x() + i * 22, area.y() + i * 14, w, h) for i in range(3)]
+        columns = 2 if mode == "grid_2" else 2
+        rows = 2
+        w = max(20, (area.width() - gap) // columns)
+        h = max(12, (area.height() - gap) // rows)
+        return [
+            QRect(area.x() + (i % columns) * (w + gap), area.y() + (i // columns) * (h + gap), w, h)
+            for i in range(4)
+        ]
+
+
 class AppSettingsDialog(QDialog):
     def __init__(
         self,
@@ -225,6 +361,8 @@ class AppSettingsDialog(QDialog):
         restart_enabled: bool,
         restart_time: QTime,
         auto_update_enabled: bool,
+        theme_name: str,
+        layout_mode: str,
         log_memory_enabled: bool,
         log_max_mb: int,
         discord_enabled: bool,
@@ -237,7 +375,7 @@ class AppSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("設定")
         self.setModal(True)
-        self.resize(660, 370)
+        self.resize(760, 520)
         self.result_settings: Optional[Dict] = None
         self.open_config_callback = open_config_callback
         self.check_update_callback = check_update_callback
@@ -250,6 +388,17 @@ class AppSettingsDialog(QDialog):
         self.restart_time_edit.setTime(restart_time)
         self.auto_update_enabled_check = QCheckBox("自動檢查更新")
         self.auto_update_enabled_check.setChecked(auto_update_enabled)
+        self.theme_group = QButtonGroup(self)
+        self.theme_radios: Dict[str, QRadioButton] = {}
+        self.layout_group = QButtonGroup(self)
+        self.layout_radios: Dict[str, QRadioButton] = {}
+        self.initial_theme_name = theme_name if theme_name in {"dark", "light", "warm"} else "dark"
+        self.initial_layout_mode = (
+            layout_mode
+            if layout_mode in {"grid_auto", "grid_2", "vertical", "horizontal", "cascade"}
+            else "grid_2"
+        )
+
         self.log_memory_enabled_check = QCheckBox("啟用 Log 記憶功能")
         self.log_memory_enabled_check.setChecked(log_memory_enabled)
         self.log_max_mb_spin = QSpinBox()
@@ -274,7 +423,7 @@ class AppSettingsDialog(QDialog):
         check_update_btn = QPushButton("立即檢查更新")
         check_update_btn.clicked.connect(self.check_update_callback)
 
-        tabs = QTabWidget()
+        self.tabs = QTabWidget()
 
         general_tab = QWidget()
         general_layout = QVBoxLayout(general_tab)
@@ -302,23 +451,32 @@ class AppSettingsDialog(QDialog):
         general_layout.addWidget(update_group)
         general_layout.addWidget(config_group)
         general_layout.addStretch(1)
-        tabs.addTab(general_tab, "一般")
+        self.tabs.addTab(general_tab, "一般")
+
+        appearance_tab = QWidget()
+        appearance_layout = QVBoxLayout(appearance_tab)
+        appearance_layout.setContentsMargins(10, 10, 10, 10)
+        appearance_layout.setSpacing(10)
+        appearance_layout.addWidget(self._build_theme_picker())
+        appearance_layout.addWidget(self._build_layout_picker())
+        appearance_layout.addStretch(1)
+        self.tabs.addTab(appearance_tab, "外觀")
 
         log_tab = QWidget()
         log_form = QFormLayout(log_tab)
         log_form.addRow("", self.log_memory_enabled_check)
         log_form.addRow("全部任務 Log 上限", log_max_mb_row)
-        tabs.addTab(log_tab, "Log")
+        self.tabs.addTab(log_tab, "Log")
 
-        discord_tab = QWidget()
-        discord_form = QFormLayout(discord_tab)
+        self.discord_tab = QWidget()
+        discord_form = QFormLayout(self.discord_tab)
         discord_form.addRow("", self.discord_enabled_check)
         discord_form.addRow("Discord 通知標題", self.status_title_edit)
         discord_form.addRow("Webhook URL", self.webhook_edit)
         discord_form.addRow("Discord 回傳間隔", interval_row)
-        tabs.addTab(discord_tab, "Discord")
+        self.tabs.addTab(self.discord_tab, "Discord")
 
-        tabs.addTab(self._build_about_tab(), "關於")
+        self.tabs.addTab(self._build_about_tab(), "關於")
 
         save_btn = QPushButton("儲存")
         save_btn.clicked.connect(self._save)
@@ -331,18 +489,20 @@ class AppSettingsDialog(QDialog):
         buttons.addWidget(cancel_btn)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(tabs)
+        layout.addWidget(self.tabs)
         layout.addLayout(buttons)
 
     def _save(self) -> None:
         webhook_url = self.webhook_edit.text().strip()
-        if self.discord_enabled_check.isChecked() and not webhook_url:
+        if self.tabs.currentWidget() is self.discord_tab and self.discord_enabled_check.isChecked() and not webhook_url:
             QMessageBox.warning(self, "欄位錯誤", "啟用 Discord 通知時，請輸入 Webhook URL。")
             return
         self.result_settings = {
             "restart_enabled": self.restart_enabled_check.isChecked(),
             "restart_time": self.restart_time_edit.time(),
             "auto_update_enabled": self.auto_update_enabled_check.isChecked(),
+            "theme_name": self._selected_theme_name(),
+            "layout_mode": self._selected_layout_mode(),
             "log_memory_enabled": self.log_memory_enabled_check.isChecked(),
             "log_max_mb": self.log_max_mb_spin.value(),
             "discord_enabled": self.discord_enabled_check.isChecked(),
@@ -351,6 +511,71 @@ class AppSettingsDialog(QDialog):
             "interval_minutes": self.interval_spin.value(),
         }
         self.accept()
+
+    def _build_theme_picker(self) -> QGroupBox:
+        group = QGroupBox("樣式主題")
+        group.setObjectName("settingsSection")
+        layout = QHBoxLayout(group)
+        layout.setSpacing(10)
+        options = [("深色", "dark"), ("淺色", "light"), ("暖色", "warm")]
+        for label, value in options:
+            card = QWidget()
+            card.setObjectName("previewCard")
+            card_layout = QVBoxLayout(card)
+            radio = QRadioButton(label)
+            radio.setProperty("value", value)
+            preview = ThemePreview(value)
+            preview.setMinimumSize(180, 104)
+            preview.mousePressEvent = lambda event, checked_radio=radio: checked_radio.setChecked(True)
+            self.theme_group.addButton(radio)
+            self.theme_radios[value] = radio
+            card_layout.addWidget(radio)
+            card_layout.addWidget(preview)
+            layout.addWidget(card)
+        self.theme_radios.get(self.initial_theme_name, self.theme_radios["dark"]).setChecked(True)
+        return group
+
+    def _build_layout_picker(self) -> QGroupBox:
+        group = QGroupBox("整理版面方式")
+        group.setObjectName("settingsSection")
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(8)
+        options = [
+            ("自動網格", "grid_auto"),
+            ("雙欄網格", "grid_2"),
+            ("垂直堆疊", "vertical"),
+            ("水平排列", "horizontal"),
+            ("階梯重疊", "cascade"),
+        ]
+        for idx, (label, value) in enumerate(options):
+            card = QWidget()
+            card.setObjectName("previewCard")
+            card_layout = QVBoxLayout(card)
+            radio = QRadioButton(label)
+            radio.setProperty("value", value)
+            preview = LayoutPreview(value)
+            preview.setMinimumSize(170, 88)
+            preview.mousePressEvent = lambda event, checked_radio=radio: checked_radio.setChecked(True)
+            self.layout_group.addButton(radio)
+            self.layout_radios[value] = radio
+            card_layout.addWidget(radio)
+            card_layout.addWidget(preview)
+            layout.addWidget(card, idx // 3, idx % 3)
+        self.layout_radios.get(self.initial_layout_mode, self.layout_radios["grid_2"]).setChecked(True)
+        return group
+
+    def _selected_theme_name(self) -> str:
+        for value, radio in self.theme_radios.items():
+            if radio.isChecked():
+                return value
+        return "dark"
+
+    def _selected_layout_mode(self) -> str:
+        for value, radio in self.layout_radios.items():
+            if radio.isChecked():
+                return value
+        return "grid_2"
 
     def _build_about_tab(self) -> QWidget:
         tab = QWidget()

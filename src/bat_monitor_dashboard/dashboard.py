@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 
 import psutil
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QRect, QSize, Qt, QTime, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPen
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -76,6 +76,8 @@ class DashboardWindow(QMainWindow):
         self.windows: Dict[str, QMdiSubWindow] = {}
         self.last_restart_key = ""
         self.sidebar_collapsed = False
+        self.theme_name = "dark"
+        self.layout_mode = "grid_2"
         self.auto_update_enabled = True
         self.update_checking = False
         self.updating_now = False
@@ -131,8 +133,8 @@ class DashboardWindow(QMainWindow):
         self.restart_time.setDisplayFormat("HH:mm")
 
         self._build_toolbar()
-        self._apply_dark_style()
         self.load_config()
+        self._apply_style()
         self._apply_sidebar_state()
         self._refresh_task_list()
         self._create_panels()
@@ -184,6 +186,8 @@ class DashboardWindow(QMainWindow):
             self.restart_enabled.isChecked(),
             self.restart_time.time(),
             self.auto_update_enabled,
+            self.theme_name,
+            self.layout_mode,
             self.log_memory_enabled,
             self.log_max_mb,
             self.discord_enabled,
@@ -199,6 +203,10 @@ class DashboardWindow(QMainWindow):
             self.restart_time.setTime(dialog.result_settings["restart_time"])
             old_auto_update_enabled = self.auto_update_enabled
             self.auto_update_enabled = dialog.result_settings["auto_update_enabled"]
+            old_theme_name = self.theme_name
+            old_layout_mode = self.layout_mode
+            self.theme_name = dialog.result_settings["theme_name"]
+            self.layout_mode = dialog.result_settings["layout_mode"]
             self.log_memory_enabled = dialog.result_settings["log_memory_enabled"]
             self.log_max_mb = dialog.result_settings["log_max_mb"]
             for task in self.tasks:
@@ -214,6 +222,10 @@ class DashboardWindow(QMainWindow):
                 self.discord_message_id = ""
             self.last_discord_sent_at = 0.0
             self.save_config()
+            if self.theme_name != old_theme_name:
+                self._apply_style()
+            if self.layout_mode != old_layout_mode:
+                self.arrange_panels()
             if self.auto_update_enabled and not old_auto_update_enabled:
                 self.check_for_updates()
             self._update_metrics(force_discord=True)
@@ -699,7 +711,34 @@ class DashboardWindow(QMainWindow):
             return
         area = self.mdi.viewport().rect()
         margin = 8
-        columns = 2 if len(windows) > 1 else 1
+        mode = self.layout_mode if self.layout_mode in {"grid_auto", "grid_2", "vertical", "horizontal", "cascade"} else "grid_2"
+
+        if mode == "cascade":
+            width = min(max(420, int(area.width() * 0.58)), max(420, area.width() - margin * 2))
+            height = min(max(240, int(area.height() * 0.48)), max(240, area.height() - margin * 2))
+            step = 32
+            for idx, window in enumerate(windows):
+                rect = self._bounded_rect({
+                    "x": margin + idx * step,
+                    "y": margin + idx * step,
+                    "w": width,
+                    "h": height,
+                })
+                window.setGeometry(rect)
+            self.save_config()
+            return
+
+        if mode == "vertical":
+            columns = 1
+        elif mode == "horizontal":
+            columns = len(windows)
+        elif mode == "grid_auto":
+            columns = max(1, int(len(windows) ** 0.5))
+            if columns * columns < len(windows):
+                columns += 1
+        else:
+            columns = 2 if len(windows) > 1 else 1
+
         rows = (len(windows) + columns - 1) // columns
         cell_w = max(280, (area.width() - margin * (columns + 1)) // columns)
         cell_h = max(180, (area.height() - margin * (rows + 1)) // rows)
@@ -1066,6 +1105,12 @@ class DashboardWindow(QMainWindow):
             settings = data.get("settings", {})
             self.restart_enabled.setChecked(bool(settings.get("restart_enabled", False)))
             self.sidebar_collapsed = bool(settings.get("sidebar_collapsed", False))
+            self.theme_name = str(settings.get("theme_name", "dark"))
+            if self.theme_name not in {"dark", "light", "warm"}:
+                self.theme_name = "dark"
+            self.layout_mode = str(settings.get("layout_mode", "grid_2"))
+            if self.layout_mode not in {"grid_auto", "grid_2", "vertical", "horizontal", "cascade"}:
+                self.layout_mode = "grid_2"
             self.auto_update_enabled = bool(settings.get("auto_update_enabled", True))
             self.log_memory_enabled = bool(settings.get("log_memory_enabled", True))
             self.log_max_mb = max(1, int(settings.get("log_max_mb", DEFAULT_LOG_MAX_MB)))
@@ -1095,6 +1140,8 @@ class DashboardWindow(QMainWindow):
                 "restart_enabled": self.restart_enabled.isChecked(),
                 "restart_time": self.restart_time.time().toString("HH:mm"),
                 "sidebar_collapsed": self.sidebar_collapsed,
+                "theme_name": self.theme_name,
+                "layout_mode": self.layout_mode,
                 "auto_update_enabled": self.auto_update_enabled,
                 "log_memory_enabled": self.log_memory_enabled,
                 "log_max_mb": self.log_max_mb,
@@ -1132,7 +1179,239 @@ class DashboardWindow(QMainWindow):
                 panel.flush_log()
         event.accept()
 
-    def _apply_dark_style(self) -> None:
+    def _apply_style(self) -> None:
+        light_overrides = """
+            QMainWindow, QWidget {
+                background: #f6f8fa;
+                color: #1f2328;
+            }
+            QLabel, QCheckBox {
+                background: transparent;
+            }
+            QWidget#previewCard {
+                background: transparent;
+            }
+            QRadioButton {
+                background: transparent;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                border: 1px solid #8c959f;
+                background: #ffffff;
+            }
+            QRadioButton::indicator:checked {
+                border: 4px solid #0969da;
+                background: #ffffff;
+            }
+            QToolBar {
+                background: #ffffff;
+                border-bottom: 1px solid #d0d7de;
+            }
+            QGroupBox {
+                background: #ffffff;
+                border: 1px solid #d0d7de;
+            }
+            QGroupBox::title {
+                background: transparent;
+                color: #0969da;
+            }
+            QGroupBox#settingsSection {
+                background: transparent;
+                border: 1px solid #d0d7de;
+            }
+            QGroupBox#settingsSection::title {
+                background: transparent;
+                color: #1f2328;
+            }
+            QLabel#metricValue {
+                color: #116329;
+            }
+            QToolButton, QPushButton {
+                background: #f6f8fa;
+                color: #24292f;
+                border: 1px solid #d0d7de;
+            }
+            QToolButton:hover, QPushButton:hover {
+                background: #eef2f6;
+            }
+            QLineEdit, QSpinBox, QTimeEdit, QListWidget, QComboBox {
+                background: #ffffff;
+                color: #1f2328;
+                border: 1px solid #d0d7de;
+                selection-background-color: #0969da;
+            }
+            QListWidget::item:selected {
+                background: #0969da;
+                color: #ffffff;
+            }
+            QMdiArea {
+                background: #eef2f6;
+            }
+            QMdiSubWindow {
+                background: #ffffff;
+                border: 1px solid #d0d7de;
+            }
+            QTextEdit#terminalOutput {
+                background: #ffffff;
+                color: #116329;
+                border: 1px solid #d0d7de;
+            }
+            QLabel#statusLabel {
+                color: #0969da;
+            }
+            QTabWidget::pane {
+                background: #ffffff;
+                border: 1px solid #d0d7de;
+            }
+            QTabBar::tab {
+                background: #f6f8fa;
+                color: #24292f;
+                border: 1px solid #d0d7de;
+            }
+            QTabBar::tab:selected {
+                background: #0969da;
+                color: #ffffff;
+            }
+            QLabel#aboutName {
+                color: #1f2328;
+            }
+            QWidget#sidebarFooter {
+                background: transparent;
+            }
+            QLabel#footerText {
+                color: #57606a;
+            }
+            QToolButton#footerGitHubButton {
+                background: transparent;
+                border: 0;
+            }
+            QToolButton#footerGitHubButton:hover {
+                background: #eef2f6;
+            }
+        """
+        warm_overrides = """
+            QMainWindow, QWidget {
+                background: #fff7ed;
+                color: #431407;
+            }
+            QLabel, QCheckBox {
+                background: transparent;
+            }
+            QWidget#previewCard {
+                background: transparent;
+            }
+            QRadioButton {
+                background: transparent;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                border: 1px solid #d97706;
+                background: #fff7ed;
+            }
+            QRadioButton::indicator:checked {
+                border: 4px solid #c2410c;
+                background: #ffffff;
+            }
+            QToolBar {
+                background: #fffbeb;
+                border-bottom: 1px solid #fed7aa;
+            }
+            QGroupBox {
+                background: #fffbeb;
+                border: 1px solid #fed7aa;
+            }
+            QGroupBox::title {
+                background: transparent;
+                color: #c2410c;
+            }
+            QGroupBox#settingsSection {
+                background: transparent;
+                border: 1px solid #fed7aa;
+            }
+            QGroupBox#settingsSection::title {
+                background: transparent;
+                color: #431407;
+            }
+            QLabel#metricValue {
+                color: #9a3412;
+            }
+            QToolButton, QPushButton {
+                background: #fffbeb;
+                color: #431407;
+                border: 1px solid #fdba74;
+            }
+            QToolButton:hover, QPushButton:hover {
+                background: #fed7aa;
+            }
+            QLineEdit, QSpinBox, QTimeEdit, QListWidget, QComboBox {
+                background: #ffffff;
+                color: #431407;
+                border: 1px solid #fdba74;
+                selection-background-color: #c2410c;
+            }
+            QListWidget::item:selected {
+                background: #c2410c;
+                color: #ffffff;
+            }
+            QMdiArea {
+                background: #ffedd5;
+            }
+            QMdiSubWindow {
+                background: #ffffff;
+                border: 1px solid #fdba74;
+            }
+            QTextEdit#terminalOutput {
+                background: #fffaf0;
+                color: #7c2d12;
+                border: 1px solid #fdba74;
+            }
+            QLabel#statusLabel {
+                color: #c2410c;
+            }
+            QTabWidget::pane {
+                background: #fffbeb;
+                border: 1px solid #fed7aa;
+            }
+            QTabBar::tab {
+                background: #fff7ed;
+                color: #431407;
+                border: 1px solid #fed7aa;
+            }
+            QTabBar::tab:selected {
+                background: #c2410c;
+                color: #ffffff;
+            }
+            QLabel#aboutName {
+                color: #431407;
+            }
+            QWidget#sidebarFooter {
+                background: transparent;
+            }
+            QLabel#footerText {
+                color: #9a3412;
+            }
+            QToolButton#footerGitHubButton {
+                background: transparent;
+                border: 0;
+            }
+            QToolButton#footerGitHubButton:hover {
+                background: #fed7aa;
+            }
+        """
+        theme_overrides = ""
+        mdi_background = "#0b0f14"
+        if self.theme_name == "light":
+            theme_overrides = light_overrides
+            mdi_background = "#eef2f6"
+        elif self.theme_name == "warm":
+            theme_overrides = warm_overrides
+            mdi_background = "#ffedd5"
         self.setStyleSheet(
             """
             QMainWindow, QWidget {
@@ -1143,6 +1422,24 @@ class DashboardWindow(QMainWindow):
             }
             QLabel, QCheckBox {
                 background: transparent;
+            }
+            QWidget#previewCard {
+                background: transparent;
+            }
+            QRadioButton {
+                background: transparent;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                border: 1px solid #8b949e;
+                background: #0d1117;
+            }
+            QRadioButton::indicator:checked {
+                border: 4px solid #1f6feb;
+                background: #ffffff;
             }
             QToolBar {
                 background: #171b21;
@@ -1189,7 +1486,7 @@ class DashboardWindow(QMainWindow):
             QToolButton:hover, QPushButton:hover {
                 background: #334152;
             }
-            QLineEdit, QSpinBox, QTimeEdit, QListWidget {
+            QLineEdit, QSpinBox, QTimeEdit, QListWidget, QComboBox {
                 background: #0d1117;
                 color: #e6edf3;
                 border: 1px solid #30363d;
@@ -1261,4 +1558,6 @@ class DashboardWindow(QMainWindow):
                 border-radius: 4px;
             }
             """
+            + theme_overrides
         )
+        self.mdi.setBackground(QBrush(QColor(mdi_background)))
