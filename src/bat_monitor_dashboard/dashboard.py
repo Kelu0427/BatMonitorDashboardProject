@@ -44,8 +44,6 @@ from .constants import (
     APP_VERSION,
     DEFAULT_GEOMETRY,
     DEFAULT_LOG_MAX_MB,
-    DISCORD_CHART_TITLE,
-    DISCORD_FOOTER_TEXT,
     DISCORD_STATUS_TITLE,
     GITHUB_LATEST_RELEASE_API,
     GITHUB_REPOSITORY_URL,
@@ -925,61 +923,17 @@ class DashboardWindow(QMainWindow):
         return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
     def _build_discord_payload(self, metrics: Dict) -> Dict:
-        cpu = metrics["cpu_percent"]
-        memory = metrics["memory_percent"]
-        disk = metrics["disk_percent"]
-        color = 0x2ECC71
-        status = "正常"
-        if cpu >= 90 or memory >= 90 or disk >= 90:
-            color = 0xE74C3C
-            status = "需要注意"
-        elif cpu >= 75 or memory >= 80 or disk >= 80:
-            color = 0xF1C40F
-            status = "偏高"
-
-        fields = [
-            {"name": "心跳", "value": metrics["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), "inline": True},
-            {"name": "主機", "value": metrics["hostname"], "inline": True},
-            {"name": "狀態", "value": status, "inline": True},
-            {"name": "CPU", "value": f"{cpu:.1f}%", "inline": True},
-            {
-                "name": "記憶體",
-                "value": f'{memory:.1f}%\n{metrics["memory_used_gb"]:.1f}/{metrics["memory_total_gb"]:.1f} GB',
-                "inline": True,
-            },
-            {
-                "name": "系統碟",
-                "value": f'{disk:.1f}% 使用\n剩餘 {metrics["disk_free_gb"]:.1f} GB',
-                "inline": True,
-            },
-            {"name": "監控任務", "value": f'{metrics["running_tasks"]}/{metrics["total_tasks"]} 執行中', "inline": True},
-            {"name": "開機時間", "value": metrics["uptime"], "inline": True},
-            {
-                "name": "累計網路",
-                "value": f'↑ {metrics["net_sent_mb"]:.0f} MB / ↓ {metrics["net_recv_mb"]:.0f} MB',
-                "inline": True,
-            },
-        ]
         return {
-            "embeds": [
-                {
-                    "title": self.discord_status_title or DISCORD_STATUS_TITLE,
-                    "description": f"**{status}** - {metrics['os']}",
-                    "color": color,
-                    "fields": fields,
-                    "image": {"url": "attachment://status.png"},
-                    "footer": {"text": DISCORD_FOOTER_TEXT},
-                    "timestamp": metrics["timestamp"].isoformat(),
-                }
-            ],
+            "content": "",
+            "embeds": [],
             "allowed_mentions": {"parse": []},
         }
 
     def _build_discord_chart_png(self, metrics: Dict) -> bytes:
         width = 960
-        height = 520
+        height = 560
         image = QImage(width, height, QImage.Format.Format_ARGB32)
-        image.fill(QColor("#111820"))
+        image.fill(QColor("#0b1118"))
 
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1005,150 +959,147 @@ class DashboardWindow(QMainWindow):
                 return QColor("#f6c343")
             return QColor("#38d98b")
 
-        def draw_donut(cx: int, cy: int, radius: int, percent: float, label: str, detail: str, color: QColor) -> None:
-            rect = QRect(cx - radius, cy - radius, radius * 2, radius * 2)
-            base_pen = QPen(QColor("#27313b"), 18)
-            base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(base_pen)
-            painter.drawArc(rect, 90 * 16, -360 * 16)
-
-            value_pen = QPen(color, 18)
-            value_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(value_pen)
-            painter.drawArc(rect, 90 * 16, int(-360 * 16 * max(0.0, min(percent, 100.0)) / 100))
-
-            painter.setPen(QColor("#f4fbff"))
-            set_font(22, True)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"{percent:.1f}%")
-            painter.setPen(QColor("#9fb0bf"))
-            set_font(11)
-            painter.drawText(QRect(cx - 95, cy + radius + 16, 190, 24), Qt.AlignmentFlag.AlignCenter, label)
-            painter.setPen(QColor("#dbeafe"))
-            set_font(10)
-            painter.drawText(QRect(cx - 120, cy + radius + 40, 240, 24), Qt.AlignmentFlag.AlignCenter, detail)
-
         def elide_text(text: str, max_chars: int) -> str:
             return text if len(text) <= max_chars else text[: max_chars - 1] + "..."
+
+        def fill_rounded(rect: QRect, color: QColor, radius: int = 12) -> None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(rect, radius, radius)
+
+        def draw_bar(rect: QRect, ratio: float, color: QColor) -> None:
+            fill_rounded(rect, QColor("#263241"), rect.height() // 2)
+            width_px = max(rect.height(), int(rect.width() * max(0.0, min(1.0, ratio))))
+            fill_rounded(QRect(rect.x(), rect.y(), width_px, rect.height()), color, rect.height() // 2)
 
         def draw_status_light(cx: int, cy: int, color: QColor) -> None:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(color.red(), color.green(), color.blue(), 46))
-            painter.drawEllipse(cx - 8, cy - 8, 16, 16)
+            painter.drawEllipse(cx - 9, cy - 9, 18, 18)
             painter.setBrush(color)
             painter.drawEllipse(cx - 5, cy - 5, 10, 10)
 
+        def draw_metric_card(rect: QRect, title: str, value: str, detail: str, color: QColor, ratio: Optional[float] = None) -> None:
+            fill_rounded(rect, QColor("#151f2a"), 14)
+            painter.setPen(QColor("#9caebb"))
+            set_font(10, True)
+            painter.drawText(rect.adjusted(18, 16, -18, -16), Qt.AlignmentFlag.AlignTop, title)
+
+            painter.setPen(QColor("#f4fbff"))
+            set_font(24, True)
+            painter.drawText(rect.adjusted(18, 42, -18, -16), Qt.AlignmentFlag.AlignTop, value)
+
+            painter.setPen(QColor("#c7d3df"))
+            set_font(10)
+            painter.drawText(rect.adjusted(18, 86, -18, -16), Qt.AlignmentFlag.AlignTop, detail)
+
+            if ratio is not None:
+                draw_bar(QRect(rect.x() + 18, rect.bottom() - 24, rect.width() - 36, 9), ratio, color)
+
         set_font(19, True)
         painter.setPen(QColor("#f4fbff"))
-        painter.drawText(28, 42, DISCORD_CHART_TITLE)
+        painter.drawText(30, 38, self.discord_status_title or DISCORD_STATUS_TITLE)
         set_font(10)
         painter.setPen(QColor("#9fb0bf"))
-        painter.drawText(30, 68, metrics["timestamp"].strftime("%Y-%m-%d %H:%M:%S %Z"))
+        painter.drawText(32, 64, metrics["timestamp"].strftime("%Y-%m-%d %H:%M:%S %Z"))
 
-        draw_donut(
-            160,
-            180,
-            72,
-            metrics["cpu_percent"],
-            "CPU",
-            "處理器使用率",
-            metric_color(metrics["cpu_percent"], 75, 90),
-        )
-        draw_donut(
-            370,
-            180,
-            72,
-            metrics["memory_percent"],
-            "記憶體",
-            f'{metrics["memory_used_gb"]:.1f}/{metrics["memory_total_gb"]:.1f} GB',
-            metric_color(metrics["memory_percent"], 80, 90),
-        )
-        draw_donut(
-            580,
-            180,
-            72,
-            metrics["disk_percent"],
-            "系統碟",
-            f'剩餘 {metrics["disk_free_gb"]:.1f} GB',
-            metric_color(metrics["disk_percent"], 80, 90),
-        )
-
-        panel = QRect(720, 86, 210, 222)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#18222d"))
-        painter.drawRoundedRect(panel, 12, 12)
-
-        painter.setPen(QColor("#9fb0bf"))
-        set_font(10)
-        painter.drawText(744, 122, "監控任務")
-        painter.setPen(QColor("#f4fbff"))
-        set_font(24, True)
-        painter.drawText(744, 158, f'{metrics["running_tasks"]}/{metrics["total_tasks"]}')
-
+        task_statuses = list(metrics.get("task_statuses", []))
         total_tasks = max(1, metrics["total_tasks"])
         running_ratio = max(0.0, min(metrics["running_tasks"] / total_tasks, 1.0))
-        bar = QRect(744, 174, 158, 12)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#27313b"))
-        painter.drawRoundedRect(bar, 6, 6)
-        painter.setBrush(QColor("#38d98b"))
-        painter.drawRoundedRect(QRect(bar.x(), bar.y(), int(bar.width() * running_ratio), bar.height()), 6, 6)
 
-        painter.setPen(QColor("#9fb0bf"))
-        set_font(10)
-        painter.drawText(744, 222, "開機時間")
-        painter.setPen(QColor("#dbeafe"))
-        set_font(13, True)
-        painter.drawText(744, 248, metrics["uptime"])
+        draw_metric_card(
+            QRect(30, 92, 206, 132),
+            "CPU",
+            f'{metrics["cpu_percent"]:.1f}%',
+            "處理器使用率",
+            metric_color(metrics["cpu_percent"], 75, 90),
+            metrics["cpu_percent"] / 100,
+        )
+        draw_metric_card(
+            QRect(252, 92, 206, 132),
+            "記憶體",
+            f'{metrics["memory_percent"]:.1f}%',
+            f'{metrics["memory_used_gb"]:.1f}/{metrics["memory_total_gb"]:.1f} GB',
+            metric_color(metrics["memory_percent"], 80, 90),
+            metrics["memory_percent"] / 100,
+        )
+        draw_metric_card(
+            QRect(474, 92, 206, 132),
+            "系統碟",
+            f'{metrics["disk_percent"]:.1f}%',
+            f'剩餘 {metrics["disk_free_gb"]:.1f} GB',
+            metric_color(metrics["disk_percent"], 80, 90),
+            metrics["disk_percent"] / 100,
+        )
 
-        painter.setPen(QColor("#9fb0bf"))
-        set_font(10)
-        painter.drawText(744, 278, "累計網路")
-        painter.setPen(QColor("#dbeafe"))
-        set_font(12, True)
-        painter.drawText(744, 302, f'↑ {metrics["net_sent_mb"]:.0f} MB / ↓ {metrics["net_recv_mb"]:.0f} MB')
+        draw_metric_card(
+            QRect(696, 92, 234, 132),
+            "監控任務",
+            f'{metrics["running_tasks"]}/{metrics["total_tasks"]}',
+            "BAT 任務執行中",
+            QColor("#38d98b"),
+            running_ratio,
+        )
 
-        tasks_panel = QRect(28, 340, 904, 150)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#18222d"))
-        painter.drawRoundedRect(tasks_panel, 12, 12)
+        info_panel = QRect(30, 246, 900, 78)
+        fill_rounded(info_panel, QColor("#111a24"), 14)
+        summary_items = [
+            ("主機", str(metrics.get("hostname", "-"))),
+            ("開機時間", str(metrics["uptime"])),
+            ("累計網路", f'↑ {metrics["net_sent_mb"]:.0f} MB / ↓ {metrics["net_recv_mb"]:.0f} MB'),
+            ("作業系統", str(metrics.get("os", "-"))),
+        ]
+        for idx, (label, value) in enumerate(summary_items):
+            x = 54 + idx * 220
+            painter.setPen(QColor("#91a4b5"))
+            set_font(10)
+            painter.drawText(QRect(x, 264, 190, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+            painter.setPen(QColor("#e7f0f7"))
+            set_font(11, True)
+            painter.drawText(QRect(x, 288, 190, 22), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elide_text(value, 20))
+
+        tasks_panel = QRect(30, 348, 900, 176)
+        fill_rounded(tasks_panel, QColor("#151f2a"), 14)
 
         set_font(15, True)
         painter.setPen(QColor("#f4fbff"))
-        painter.drawText(52, 374, "BAT 任務生命狀態")
+        painter.drawText(54, 382, "BAT 任務生命狀態")
         set_font(10)
         painter.setPen(QColor("#9fb0bf"))
-        painter.drawText(210, 374, f'{metrics["running_tasks"]}/{metrics["total_tasks"]} 執行中')
+        painter.drawText(224, 382, f'{metrics["running_tasks"]}/{metrics["total_tasks"]} 執行中')
 
-        task_statuses = list(metrics.get("task_statuses", []))
         if not task_statuses:
             painter.setPen(QColor("#9fb0bf"))
             set_font(12)
-            painter.drawText(QRect(52, 402, 840, 48), Qt.AlignmentFlag.AlignVCenter, "尚未設定監控任務")
+            painter.drawText(QRect(54, 420, 840, 48), Qt.AlignmentFlag.AlignVCenter, "尚未設定監控任務")
         else:
             visible = task_statuses[:8]
             columns = 2
-            row_h = 26
-            start_y = 404
-            col_w = 420
+            row_h = 30
+            start_y = 414
+            col_w = 430
             for idx, task_status in enumerate(visible):
                 col = idx % columns
                 row = idx // columns
-                x = 54 + col * col_w
+                x = 56 + col * col_w
                 y = start_y + row * row_h
                 state = str(task_status.get("state", "stopped"))
                 label = str(task_status.get("label", "已停止"))
                 color = QColor("#38d98b") if state == "running" else QColor("#ff5c6c")
-                draw_status_light(x + 8, y + 8, color)
+                row_rect = QRect(x - 8, y - 3, 392, 26)
+                fill_rounded(row_rect, QColor("#101821"), 8)
+
+                draw_status_light(x + 10, y + 10, color)
                 painter.setPen(QColor("#f4fbff"))
                 set_font(11, True)
-                painter.drawText(QRect(x + 24, y - 3, 210, 22), Qt.AlignmentFlag.AlignVCenter, elide_text(str(task_status.get("name", "未命名任務")), 18))
+                painter.drawText(QRect(x + 32, y - 2, 230, 24), Qt.AlignmentFlag.AlignVCenter, elide_text(str(task_status.get("name", "未命名任務")), 20))
                 painter.setPen(color)
                 set_font(10, True)
-                painter.drawText(QRect(x + 250, y - 3, 70, 22), Qt.AlignmentFlag.AlignVCenter, label)
+                painter.drawText(QRect(x + 292, y - 2, 80, 24), Qt.AlignmentFlag.AlignVCenter, label)
             if len(task_statuses) > len(visible):
                 painter.setPen(QColor("#9fb0bf"))
                 set_font(10)
-                painter.drawText(QRect(54, 466, 820, 20), Qt.AlignmentFlag.AlignVCenter, f"另有 {len(task_statuses) - len(visible)} 個任務未顯示")
+                painter.drawText(QRect(56, 500, 820, 20), Qt.AlignmentFlag.AlignVCenter, f"另有 {len(task_statuses) - len(visible)} 個任務未顯示")
 
         painter.end()
 
