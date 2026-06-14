@@ -347,6 +347,12 @@ class MonitorPanel(QWidget):
         stripped = line.strip()
         if not stripped:
             return False
+        if re.fullmatch(r"(WAIT\s+)?Compiling\.\.\..*", stripped):
+            return True
+        if re.fullmatch(r"\.*(上午|下午)\d{1,2}:\d{2}:\d{2}", stripped):
+            return True
+        if re.fullmatch(r"Build finished at \d{2}:\d{2}:\d{2} by \d+(?:\.\d+)?s", stripped):
+            return True
         if stripped == "onPlugin)":
             return True
         if re.fullmatch(r"\d?\)+", stripped):
@@ -369,6 +375,7 @@ class MonitorPanel(QWidget):
         if not lines:
             return
         recent = "\n".join(lines[-self.task.max_lines:])
+        recent = self._prepare_log_text(self._clean_terminal_text(recent))
         self.output.setPlainText(recent + "\n")
         self.output.moveCursor(QTextCursor.End)
         self.log_read_pos = self.log_path.stat().st_size if self.log_path.exists() else 0
@@ -376,6 +383,7 @@ class MonitorPanel(QWidget):
 
     def _prepare_log_text(self, text: str) -> str:
         prepared = []
+        blank_count = 0
         normalized = text.replace("\r\n", "\n").replace("\n\r", "\n")
         for part in normalized.splitlines(keepends=True):
             has_newline = part.endswith("\n")
@@ -384,6 +392,12 @@ class MonitorPanel(QWidget):
                 line = line.split("\r")[-1]
             if self._is_noisy_progress_line(line):
                 continue
+            if not line.strip():
+                blank_count += 1
+                if blank_count > 2:
+                    continue
+            else:
+                blank_count = 0
             prepared.append(line + ("\n" if has_newline else ""))
         return "".join(prepared)
 

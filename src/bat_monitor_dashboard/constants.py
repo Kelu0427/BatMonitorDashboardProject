@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 APP_NAME = "BatMonitorDashboard"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 GITHUB_PROFILE_URL = "https://github.com/Kelu0427"
 GITHUB_REPOSITORY_URL = "https://github.com/Kelu0427/BatMonitorDashboardProject"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/Kelu0427/BatMonitorDashboardProject/releases/latest"
