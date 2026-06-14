@@ -777,6 +777,15 @@ class DashboardWindow(QMainWindow):
         net = psutil.net_io_counters()
         running_tasks = sum(1 for panel in self.panels.values() if panel.is_running())
         total_tasks = len(self.panels)
+        task_statuses = []
+        for task in self.tasks:
+            panel = self.panels.get(task.task_id)
+            running = bool(panel and panel.is_running())
+            task_statuses.append({
+                "name": task.name,
+                "state": "running" if running else "stopped",
+                "label": "正常" if running else "已停止",
+            })
         return {
             "timestamp": now,
             "hostname": socket.gethostname(),
@@ -792,6 +801,7 @@ class DashboardWindow(QMainWindow):
             "uptime": self._format_duration(uptime_seconds),
             "running_tasks": running_tasks,
             "total_tasks": total_tasks,
+            "task_statuses": task_statuses,
             "net_sent_mb": net.bytes_sent / (1024 ** 2),
             "net_recv_mb": net.bytes_recv / (1024 ** 2),
         }
@@ -967,7 +977,7 @@ class DashboardWindow(QMainWindow):
 
     def _build_discord_chart_png(self, metrics: Dict) -> bytes:
         width = 960
-        height = 360
+        height = 520
         image = QImage(width, height, QImage.Format.Format_ARGB32)
         image.fill(QColor("#111820"))
 
@@ -975,7 +985,15 @@ class DashboardWindow(QMainWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         def set_font(size: int, bold: bool = False) -> None:
-            font = QFont("Microsoft JhengHei UI")
+            font = QFont()
+            font.setFamilies([
+                "Microsoft JhengHei UI",
+                "Microsoft JhengHei",
+                "Noto Sans CJK TC",
+                "PingFang TC",
+                "Arial Unicode MS",
+                "Segoe UI",
+            ])
             font.setPointSize(size)
             font.setBold(bold)
             painter.setFont(font)
@@ -1008,6 +1026,16 @@ class DashboardWindow(QMainWindow):
             painter.setPen(QColor("#dbeafe"))
             set_font(10)
             painter.drawText(QRect(cx - 120, cy + radius + 40, 240, 24), Qt.AlignmentFlag.AlignCenter, detail)
+
+        def elide_text(text: str, max_chars: int) -> str:
+            return text if len(text) <= max_chars else text[: max_chars - 1] + "..."
+
+        def draw_status_light(cx: int, cy: int, color: QColor) -> None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 46))
+            painter.drawEllipse(cx - 8, cy - 8, 16, 16)
+            painter.setBrush(color)
+            painter.drawEllipse(cx - 5, cy - 5, 10, 10)
 
         set_font(19, True)
         painter.setPen(QColor("#f4fbff"))
@@ -1078,6 +1106,49 @@ class DashboardWindow(QMainWindow):
         painter.setPen(QColor("#dbeafe"))
         set_font(12, True)
         painter.drawText(744, 302, f'↑ {metrics["net_sent_mb"]:.0f} MB / ↓ {metrics["net_recv_mb"]:.0f} MB')
+
+        tasks_panel = QRect(28, 340, 904, 150)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#18222d"))
+        painter.drawRoundedRect(tasks_panel, 12, 12)
+
+        set_font(15, True)
+        painter.setPen(QColor("#f4fbff"))
+        painter.drawText(52, 374, "BAT 任務生命狀態")
+        set_font(10)
+        painter.setPen(QColor("#9fb0bf"))
+        painter.drawText(210, 374, f'{metrics["running_tasks"]}/{metrics["total_tasks"]} 執行中')
+
+        task_statuses = list(metrics.get("task_statuses", []))
+        if not task_statuses:
+            painter.setPen(QColor("#9fb0bf"))
+            set_font(12)
+            painter.drawText(QRect(52, 402, 840, 48), Qt.AlignmentFlag.AlignVCenter, "尚未設定監控任務")
+        else:
+            visible = task_statuses[:8]
+            columns = 2
+            row_h = 26
+            start_y = 404
+            col_w = 420
+            for idx, task_status in enumerate(visible):
+                col = idx % columns
+                row = idx // columns
+                x = 54 + col * col_w
+                y = start_y + row * row_h
+                state = str(task_status.get("state", "stopped"))
+                label = str(task_status.get("label", "已停止"))
+                color = QColor("#38d98b") if state == "running" else QColor("#ff5c6c")
+                draw_status_light(x + 8, y + 8, color)
+                painter.setPen(QColor("#f4fbff"))
+                set_font(11, True)
+                painter.drawText(QRect(x + 24, y - 3, 210, 22), Qt.AlignmentFlag.AlignVCenter, elide_text(str(task_status.get("name", "未命名任務")), 18))
+                painter.setPen(color)
+                set_font(10, True)
+                painter.drawText(QRect(x + 250, y - 3, 70, 22), Qt.AlignmentFlag.AlignVCenter, label)
+            if len(task_statuses) > len(visible):
+                painter.setPen(QColor("#9fb0bf"))
+                set_font(10)
+                painter.drawText(QRect(54, 466, 820, 20), Qt.AlignmentFlag.AlignVCenter, f"另有 {len(task_statuses) - len(visible)} 個任務未顯示")
 
         painter.end()
 
