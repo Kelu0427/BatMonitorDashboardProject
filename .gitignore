@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Local app/generated preview state
+.readme-preview/
+
+# Editor/OS
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini

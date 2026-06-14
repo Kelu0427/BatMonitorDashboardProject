@@ -1,0 +1,896 @@
+import json
+import platform
+import socket
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import psutil
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QRect, Qt, QTime, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPen
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMdiArea,
+    QMdiSubWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTimeEdit,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .constants import (
+    APP_NAME,
+    DEFAULT_GEOMETRY,
+    DISCORD_CHART_TITLE,
+    DISCORD_FOOTER_TEXT,
+    DISCORD_STATUS_TITLE,
+    user_config_path,
+)
+from .dialogs import AppSettingsDialog, DiscordSettingsDialog, TaskDialog
+from .models import MonitorTask
+from .panel import MonitorPanel
+
+
+class DashboardSignals(QObject):
+    discord_message_id_changed = Signal(str)
+
+
+class DashboardWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.config_path = user_config_path()
+        self.tasks: List[MonitorTask] = []
+        self.panels: Dict[str, MonitorPanel] = {}
+        self.windows: Dict[str, QMdiSubWindow] = {}
+        self.last_restart_key = ""
+        self.sidebar_collapsed = False
+        self.discord_enabled = False
+        self.discord_status_title = DISCORD_STATUS_TITLE
+        self.discord_webhook_url = ""
+        self.discord_interval_minutes = 5
+        self.discord_message_id = ""
+        self.last_discord_sent_at = 0.0
+        self.discord_sending = False
+        self.latest_metrics: Dict = {}
+        self.signals = DashboardSignals()
+        self.signals.discord_message_id_changed.connect(self._store_discord_message_id)
+
+        self.setWindowTitle("BAT 監控儀表板")
+        self.resize(1280, 760)
+
+        self.task_list = QListWidget()
+        self.task_list.setMinimumWidth(0)
+        self.task_list.setFixedWidth(230)
+        self.task_list.currentItemChanged.connect(self._focus_selected_panel)
+
+        self.mdi = QMdiArea()
+        self.mdi.setViewMode(QMdiArea.SubWindowView)
+
+        self.metrics_box = self._build_metrics_box()
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        right_layout.addWidget(self.metrics_box)
+        right_layout.addWidget(self.mdi, 1)
+
+        splitter = QSplitter()
+        splitter.addWidget(self.task_list)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(splitter)
+
+        self.restart_enabled = QCheckBox("每日定時全部重啟")
+        self.restart_time = QTimeEdit()
+        self.restart_time.setDisplayFormat("HH:mm")
+
+        self._build_toolbar()
+        self._apply_dark_style()
+        self.load_config()
+        self._apply_sidebar_state()
+        self._refresh_task_list()
+        self._create_panels()
+
+        for task in self.tasks:
+            if task.auto_start and task.task_id in self.panels:
+                self.panels[task.task_id].start()
+
+        self.schedule_timer = QTimer(self)
+        self.schedule_timer.timeout.connect(self._check_restart_schedule)
+        self.schedule_timer.start(15000)
+
+        self.metrics_timer = QTimer(self)
+        self.metrics_timer.timeout.connect(self._update_metrics)
+        self.metrics_timer.start(5000)
+        self._update_metrics()
+
+    def _build_toolbar(self) -> None:
+        toolbar = QToolBar("工具列")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        actions = [
+            ("新增", self.add_task),
+            ("編輯", self.edit_task),
+            ("刪除", self.delete_task),
+            ("全部啟動", self.start_all),
+            ("全部停止", self.stop_all),
+            ("全部重啟", self.restart_all),
+            ("儲存版面", self.save_layout),
+            ("整理版面", self.arrange_panels),
+            ("設定", self.edit_app_settings),
+        ]
+        for label, handler in actions:
+            action = QAction(label, self)
+            action.triggered.connect(handler)
+            toolbar.addAction(action)
+
+        toolbar.addSeparator()
+        self.sidebar_action = QAction("收合側欄", self)
+        self.sidebar_action.triggered.connect(self.toggle_sidebar)
+        toolbar.addAction(self.sidebar_action)
+
+    def edit_app_settings(self) -> None:
+        dialog = AppSettingsDialog(
+            self,
+            self.restart_enabled.isChecked(),
+            self.restart_time.time(),
+            self.discord_enabled,
+            self.discord_webhook_url,
+            self.discord_interval_minutes,
+            self.discord_status_title,
+            self.open_config_folder,
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result_settings:
+            old_webhook_url = self.discord_webhook_url
+            self.restart_enabled.setChecked(dialog.result_settings["restart_enabled"])
+            self.restart_time.setTime(dialog.result_settings["restart_time"])
+            self.discord_enabled = dialog.result_settings["discord_enabled"]
+            self.discord_status_title = dialog.result_settings["status_title"]
+            self.discord_webhook_url = dialog.result_settings["webhook_url"]
+            self.discord_interval_minutes = dialog.result_settings["interval_minutes"]
+            if self.discord_webhook_url != old_webhook_url:
+                self.discord_message_id = ""
+            self.last_discord_sent_at = 0.0
+            self.save_config()
+            self._update_metrics(force_discord=True)
+
+    def _build_metrics_box(self) -> QGroupBox:
+        box = QGroupBox("系統狀態")
+        grid = QGridLayout(box)
+        self.metric_labels: Dict[str, QLabel] = {}
+        items = [
+            ("heartbeat", "心跳"),
+            ("cpu", "CPU"),
+            ("memory", "記憶體"),
+            ("disk", "系統碟"),
+            ("uptime", "開機時間"),
+            ("tasks", "監控任務"),
+            ("network", "網路"),
+            ("discord", "Discord"),
+        ]
+        for idx, (key, title) in enumerate(items):
+            title_label = QLabel(title)
+            value_label = QLabel("-")
+            value_label.setObjectName("metricValue")
+            self.metric_labels[key] = value_label
+            row = idx // 4
+            col = (idx % 4) * 2
+            grid.addWidget(title_label, row, col)
+            grid.addWidget(value_label, row, col + 1)
+        return box
+
+    def edit_discord_settings(self) -> None:
+        dialog = DiscordSettingsDialog(
+            self,
+            self.discord_enabled,
+            self.discord_webhook_url,
+            self.discord_interval_minutes,
+            self.discord_status_title,
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result_settings:
+            old_webhook_url = self.discord_webhook_url
+            self.discord_enabled = dialog.result_settings["enabled"]
+            self.discord_status_title = dialog.result_settings["status_title"]
+            self.discord_webhook_url = dialog.result_settings["webhook_url"]
+            self.discord_interval_minutes = dialog.result_settings["interval_minutes"]
+            if self.discord_webhook_url != old_webhook_url:
+                self.discord_message_id = ""
+            self.last_discord_sent_at = 0.0
+            self.save_config()
+            self._update_metrics(force_discord=True)
+
+    def toggle_sidebar(self) -> None:
+        self.sidebar_collapsed = not self.sidebar_collapsed
+        self._apply_sidebar_state()
+        self.save_config()
+
+    def _apply_sidebar_state(self) -> None:
+        if self.sidebar_collapsed:
+            self.task_list.setVisible(False)
+            if hasattr(self, "sidebar_action"):
+                self.sidebar_action.setText("展開側欄")
+        else:
+            self.task_list.setVisible(True)
+            self.task_list.setFixedWidth(230)
+            if hasattr(self, "sidebar_action"):
+                self.sidebar_action.setText("收合側欄")
+
+    def add_task(self) -> None:
+        dialog = TaskDialog(self)
+        if dialog.exec() == QDialog.Accepted and dialog.result_task:
+            self.tasks.append(dialog.result_task)
+            self._refresh_task_list()
+            self._create_panel(dialog.result_task)
+            self.save_config()
+
+    def edit_task(self) -> None:
+        task = self._selected_task()
+        if not task:
+            QMessageBox.information(self, "提示", "請先選擇任務。")
+            return
+        self._edit_task_object(task)
+
+    def edit_task_by_id(self, task_id_value: str) -> None:
+        for task in self.tasks:
+            if task.task_id == task_id_value:
+                self._edit_task_object(task)
+                return
+
+    def _edit_task_object(self, task: MonitorTask) -> None:
+        dialog = TaskDialog(self, task)
+        if dialog.exec() == QDialog.Accepted and dialog.result_task:
+            idx = self.tasks.index(task)
+            self.tasks[idx] = dialog.result_task
+            self._refresh_task_list()
+            self._rebuild_panel(dialog.result_task)
+            self.save_config()
+
+    def delete_task(self) -> None:
+        task = self._selected_task()
+        if not task:
+            QMessageBox.information(self, "提示", "請先選擇任務。")
+            return
+        if QMessageBox.question(self, "確認刪除", f"確定要刪除「{task.name}」嗎？") != QMessageBox.Yes:
+            return
+        if task.task_id in self.panels:
+            self.panels[task.task_id].stop()
+        if task.task_id in self.windows:
+            self.windows[task.task_id].close()
+        self.tasks = [t for t in self.tasks if t.task_id != task.task_id]
+        self.panels.pop(task.task_id, None)
+        self.windows.pop(task.task_id, None)
+        self._refresh_task_list()
+        self.save_config()
+
+    def start_all(self) -> None:
+        for panel in self.panels.values():
+            panel.start()
+
+    def stop_all(self) -> None:
+        for panel in self.panels.values():
+            panel.stop()
+
+    def restart_all(self) -> None:
+        self.stop_all()
+        QTimer.singleShot(1500, self.start_all)
+
+    def save_layout(self) -> None:
+        self._capture_layout()
+        self.save_config()
+
+    def open_config_folder(self) -> None:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.config_path.exists():
+            subprocess.Popen(["explorer", "/select,", str(self.config_path)])
+        else:
+            subprocess.Popen(["explorer", str(self.config_path.parent)])
+
+    def _selected_task(self) -> Optional[MonitorTask]:
+        item = self.task_list.currentItem()
+        if not item:
+            return None
+        task_id_value = item.data(Qt.UserRole)
+        for task in self.tasks:
+            if task.task_id == task_id_value:
+                return task
+        return None
+
+    def _focus_selected_panel(self, current: Optional[QListWidgetItem]) -> None:
+        if not current:
+            return
+        task_id_value = current.data(Qt.UserRole)
+        window = self.windows.get(task_id_value)
+        if window:
+            self.mdi.setActiveSubWindow(window)
+
+    def _refresh_task_list(self) -> None:
+        selected_id = self.task_list.currentItem().data(Qt.UserRole) if self.task_list.currentItem() else None
+        self.task_list.clear()
+        for task in self.tasks:
+            item = QListWidgetItem(task.name)
+            item.setData(Qt.UserRole, task.task_id)
+            self.task_list.addItem(item)
+            if task.task_id == selected_id:
+                self.task_list.setCurrentItem(item)
+
+    def _create_panels(self) -> None:
+        self.mdi.closeAllSubWindows()
+        self.panels.clear()
+        self.windows.clear()
+        for task in self.tasks:
+            self._create_panel(task)
+
+    def _create_panel(self, task: MonitorTask) -> None:
+        panel = MonitorPanel(task, edit_callback=self.edit_task_by_id)
+        window = QMdiSubWindow()
+        window.setWidget(panel)
+        window.setWindowTitle(task.name)
+        window.setAttribute(Qt.WA_DeleteOnClose, False)
+        self.mdi.addSubWindow(window)
+        window.setGeometry(self._bounded_rect(task.geometry))
+        window.show()
+        self.panels[task.task_id] = panel
+        self.windows[task.task_id] = window
+
+    def _rebuild_panel(self, task: MonitorTask) -> None:
+        old_panel = self.panels.get(task.task_id)
+        if old_panel:
+            old_panel.stop()
+        old_window = self.windows.get(task.task_id)
+        if old_window:
+            task.geometry = {
+                "x": old_window.x(),
+                "y": old_window.y(),
+                "w": old_window.width(),
+                "h": old_window.height(),
+            }
+            old_window.close()
+        self.panels.pop(task.task_id, None)
+        self.windows.pop(task.task_id, None)
+        self._create_panel(task)
+
+    def _capture_layout(self) -> None:
+        for task in self.tasks:
+            window = self.windows.get(task.task_id)
+            if not window:
+                continue
+            rect = self._bounded_rect({
+                "x": window.x(),
+                "y": window.y(),
+                "w": window.width(),
+                "h": window.height(),
+            })
+            window.setGeometry(rect)
+            task.geometry = self._rect_to_geometry(rect)
+
+    def _bounded_rect(self, geometry: Dict[str, int]) -> QRect:
+        area = self.mdi.viewport().rect()
+        margin = 8
+        min_w = 280
+        min_h = 180
+        max_w = max(min_w, area.width() - margin * 2)
+        max_h = max(min_h, area.height() - margin * 2)
+
+        w = min(max(min_w, int(geometry.get("w", DEFAULT_GEOMETRY["w"]))), max_w)
+        h = min(max(min_h, int(geometry.get("h", DEFAULT_GEOMETRY["h"]))), max_h)
+        max_x = max(margin, area.width() - w - margin)
+        max_y = max(margin, area.height() - h - margin)
+        x = min(max(margin, int(geometry.get("x", DEFAULT_GEOMETRY["x"]))), max_x)
+        y = min(max(margin, int(geometry.get("y", DEFAULT_GEOMETRY["y"]))), max_y)
+        return QRect(x, y, w, h)
+
+    def _rect_to_geometry(self, rect: QRect) -> Dict[str, int]:
+        return {"x": rect.x(), "y": rect.y(), "w": rect.width(), "h": rect.height()}
+
+    def arrange_panels(self) -> None:
+        windows = [self.windows[task.task_id] for task in self.tasks if task.task_id in self.windows]
+        if not windows:
+            return
+        area = self.mdi.viewport().rect()
+        margin = 8
+        columns = 2 if len(windows) > 1 else 1
+        rows = (len(windows) + columns - 1) // columns
+        cell_w = max(280, (area.width() - margin * (columns + 1)) // columns)
+        cell_h = max(180, (area.height() - margin * (rows + 1)) // rows)
+        for idx, window in enumerate(windows):
+            row = idx // columns
+            col = idx % columns
+            rect = self._bounded_rect({
+                "x": margin + col * (cell_w + margin),
+                "y": margin + row * (cell_h + margin),
+                "w": cell_w,
+                "h": cell_h,
+            })
+            window.setGeometry(rect)
+        self.save_config()
+
+    def _check_restart_schedule(self) -> None:
+        if not self.restart_enabled.isChecked():
+            return
+        now = datetime.now()
+        target = self.restart_time.time().toString("HH:mm")
+        if now.strftime("%H:%M") != target:
+            return
+        key = now.strftime("%Y%m%d%H%M")
+        if key == self.last_restart_key:
+            return
+        self.last_restart_key = key
+        self.restart_all()
+
+    def _collect_metrics(self) -> Dict:
+        now = datetime.now().astimezone()
+        cpu_percent = psutil.cpu_percent(interval=None)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(str(Path.home().anchor or "C:\\"))
+        boot_time = datetime.fromtimestamp(psutil.boot_time()).astimezone()
+        uptime_seconds = int(time.time() - psutil.boot_time())
+        net = psutil.net_io_counters()
+        running_tasks = sum(1 for panel in self.panels.values() if panel.is_running())
+        total_tasks = len(self.panels)
+        return {
+            "timestamp": now,
+            "hostname": socket.gethostname(),
+            "os": f"{platform.system()} {platform.release()}",
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory.percent,
+            "memory_used_gb": memory.used / (1024 ** 3),
+            "memory_total_gb": memory.total / (1024 ** 3),
+            "disk_percent": disk.percent,
+            "disk_free_gb": disk.free / (1024 ** 3),
+            "disk_total_gb": disk.total / (1024 ** 3),
+            "boot_time": boot_time,
+            "uptime": self._format_duration(uptime_seconds),
+            "running_tasks": running_tasks,
+            "total_tasks": total_tasks,
+            "net_sent_mb": net.bytes_sent / (1024 ** 2),
+            "net_recv_mb": net.bytes_recv / (1024 ** 2),
+        }
+
+    def _update_metrics(self, force_discord: bool = False) -> None:
+        self.latest_metrics = self._collect_metrics()
+        metrics = self.latest_metrics
+        self.metric_labels["heartbeat"].setText(metrics["timestamp"].strftime("%Y-%m-%d %H:%M:%S"))
+        self.metric_labels["cpu"].setText(f'{metrics["cpu_percent"]:.1f}%')
+        self.metric_labels["memory"].setText(
+            f'{metrics["memory_percent"]:.1f}% ({metrics["memory_used_gb"]:.1f}/{metrics["memory_total_gb"]:.1f} GB)'
+        )
+        self.metric_labels["disk"].setText(
+            f'{metrics["disk_percent"]:.1f}% 使用，剩餘 {metrics["disk_free_gb"]:.1f} GB'
+        )
+        self.metric_labels["uptime"].setText(metrics["uptime"])
+        self.metric_labels["tasks"].setText(f'{metrics["running_tasks"]}/{metrics["total_tasks"]} 執行中')
+        self.metric_labels["network"].setText(
+            f'↑ {metrics["net_sent_mb"]:.0f} MB / ↓ {metrics["net_recv_mb"]:.0f} MB'
+        )
+        self.metric_labels["discord"].setText(
+            "啟用" if self.discord_enabled else "停用"
+        )
+        self._maybe_send_discord_metrics(force=force_discord)
+
+    def _maybe_send_discord_metrics(self, force: bool = False) -> None:
+        if not self.discord_enabled or not self.discord_webhook_url:
+            return
+        if self.discord_sending:
+            return
+        now = time.time()
+        interval_seconds = max(1, self.discord_interval_minutes) * 60
+        if not force and now - self.last_discord_sent_at < interval_seconds:
+            return
+        self.discord_sending = True
+        metrics = dict(self.latest_metrics)
+        thread = threading.Thread(target=self._send_discord_metrics_worker, args=(metrics,), daemon=True)
+        thread.start()
+
+    def _send_discord_metrics_worker(self, metrics: Dict) -> None:
+        try:
+            payload = self._build_discord_payload(metrics)
+            chart_png = self._build_discord_chart_png(metrics)
+            message_id = self._send_or_edit_webhook_message(payload, chart_png)
+            self.last_discord_sent_at = time.time()
+            if message_id and message_id != self.discord_message_id:
+                self.signals.discord_message_id_changed.emit(message_id)
+        except Exception as exc:
+            print(f"Discord metrics send failed: {exc}")
+        finally:
+            self.discord_sending = False
+
+    def _store_discord_message_id(self, message_id: str) -> None:
+        self.discord_message_id = message_id
+        self.save_config()
+
+    def _send_or_edit_webhook_message(self, payload: Dict, chart_png: Optional[bytes] = None) -> Optional[str]:
+        webhook_url = self.discord_webhook_url.strip().split("?", 1)[0].rstrip("/")
+        if self.discord_message_id:
+            edit_url = f"{webhook_url}/messages/{self.discord_message_id}"
+            ok, data = self._discord_request("PATCH", edit_url, payload, chart_png)
+            if ok:
+                return data.get("id", self.discord_message_id)
+            self.discord_message_id = ""
+
+        separator = "&" if "?" in webhook_url else "?"
+        ok, data = self._discord_request("POST", f"{webhook_url}{separator}wait=true", payload, chart_png)
+        if ok:
+            return data.get("id")
+        return None
+
+    def _discord_request(
+        self,
+        method: str,
+        url: str,
+        payload: Dict,
+        chart_png: Optional[bytes] = None,
+    ) -> tuple[bool, Dict]:
+        if chart_png:
+            body, content_type = self._build_discord_multipart(payload, chart_png)
+        else:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            content_type = "application/json; charset=utf-8"
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method=method,
+            headers={
+                "Content-Type": content_type,
+                "User-Agent": f"{APP_NAME}/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                response_body = response.read().decode("utf-8", errors="replace")
+                return 200 <= response.status < 300, json.loads(response_body) if response_body else {}
+        except urllib.error.HTTPError as exc:
+            exc.read()
+            return False, {}
+        except urllib.error.URLError:
+            return False, {}
+
+    def _build_discord_multipart(self, payload: Dict, chart_png: bytes) -> tuple[bytes, str]:
+        boundary = f"----{APP_NAME}-{uuid.uuid4().hex}"
+        payload = dict(payload)
+        payload["attachments"] = [{"id": 0, "filename": "status.png"}]
+        payload_json = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        parts = [
+            f"--{boundary}\r\n".encode("ascii"),
+            b'Content-Disposition: form-data; name="payload_json"\r\n',
+            b"Content-Type: application/json; charset=utf-8\r\n\r\n",
+            payload_json,
+            b"\r\n",
+            f"--{boundary}\r\n".encode("ascii"),
+            b'Content-Disposition: form-data; name="files[0]"; filename="status.png"\r\n',
+            b"Content-Type: image/png\r\n\r\n",
+            chart_png,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode("ascii"),
+        ]
+        return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+    def _build_discord_payload(self, metrics: Dict) -> Dict:
+        cpu = metrics["cpu_percent"]
+        memory = metrics["memory_percent"]
+        disk = metrics["disk_percent"]
+        color = 0x2ECC71
+        status = "正常"
+        if cpu >= 90 or memory >= 90 or disk >= 90:
+            color = 0xE74C3C
+            status = "需要注意"
+        elif cpu >= 75 or memory >= 80 or disk >= 80:
+            color = 0xF1C40F
+            status = "偏高"
+
+        fields = [
+            {"name": "心跳", "value": metrics["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), "inline": True},
+            {"name": "主機", "value": metrics["hostname"], "inline": True},
+            {"name": "狀態", "value": status, "inline": True},
+            {"name": "CPU", "value": f"{cpu:.1f}%", "inline": True},
+            {
+                "name": "記憶體",
+                "value": f'{memory:.1f}%\n{metrics["memory_used_gb"]:.1f}/{metrics["memory_total_gb"]:.1f} GB',
+                "inline": True,
+            },
+            {
+                "name": "系統碟",
+                "value": f'{disk:.1f}% 使用\n剩餘 {metrics["disk_free_gb"]:.1f} GB',
+                "inline": True,
+            },
+            {"name": "監控任務", "value": f'{metrics["running_tasks"]}/{metrics["total_tasks"]} 執行中', "inline": True},
+            {"name": "開機時間", "value": metrics["uptime"], "inline": True},
+            {
+                "name": "累計網路",
+                "value": f'↑ {metrics["net_sent_mb"]:.0f} MB / ↓ {metrics["net_recv_mb"]:.0f} MB',
+                "inline": True,
+            },
+        ]
+        return {
+            "embeds": [
+                {
+                    "title": self.discord_status_title or DISCORD_STATUS_TITLE,
+                    "description": f"**{status}** - {metrics['os']}",
+                    "color": color,
+                    "fields": fields,
+                    "image": {"url": "attachment://status.png"},
+                    "footer": {"text": DISCORD_FOOTER_TEXT},
+                    "timestamp": metrics["timestamp"].isoformat(),
+                }
+            ],
+            "allowed_mentions": {"parse": []},
+        }
+
+    def _build_discord_chart_png(self, metrics: Dict) -> bytes:
+        width = 960
+        height = 360
+        image = QImage(width, height, QImage.Format.Format_ARGB32)
+        image.fill(QColor("#111820"))
+
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        def set_font(size: int, bold: bool = False) -> None:
+            font = QFont("Microsoft JhengHei UI")
+            font.setPointSize(size)
+            font.setBold(bold)
+            painter.setFont(font)
+
+        def metric_color(value: float, warning: float, danger: float) -> QColor:
+            if value >= danger:
+                return QColor("#ff5c6c")
+            if value >= warning:
+                return QColor("#f6c343")
+            return QColor("#38d98b")
+
+        def draw_donut(cx: int, cy: int, radius: int, percent: float, label: str, detail: str, color: QColor) -> None:
+            rect = QRect(cx - radius, cy - radius, radius * 2, radius * 2)
+            base_pen = QPen(QColor("#27313b"), 18)
+            base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(base_pen)
+            painter.drawArc(rect, 90 * 16, -360 * 16)
+
+            value_pen = QPen(color, 18)
+            value_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(value_pen)
+            painter.drawArc(rect, 90 * 16, int(-360 * 16 * max(0.0, min(percent, 100.0)) / 100))
+
+            painter.setPen(QColor("#f4fbff"))
+            set_font(22, True)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"{percent:.1f}%")
+            painter.setPen(QColor("#9fb0bf"))
+            set_font(11)
+            painter.drawText(QRect(cx - 95, cy + radius + 16, 190, 24), Qt.AlignmentFlag.AlignCenter, label)
+            painter.setPen(QColor("#dbeafe"))
+            set_font(10)
+            painter.drawText(QRect(cx - 120, cy + radius + 40, 240, 24), Qt.AlignmentFlag.AlignCenter, detail)
+
+        set_font(19, True)
+        painter.setPen(QColor("#f4fbff"))
+        painter.drawText(28, 42, DISCORD_CHART_TITLE)
+        set_font(10)
+        painter.setPen(QColor("#9fb0bf"))
+        painter.drawText(30, 68, metrics["timestamp"].strftime("%Y-%m-%d %H:%M:%S %Z"))
+
+        draw_donut(
+            160,
+            180,
+            72,
+            metrics["cpu_percent"],
+            "CPU",
+            "處理器使用率",
+            metric_color(metrics["cpu_percent"], 75, 90),
+        )
+        draw_donut(
+            370,
+            180,
+            72,
+            metrics["memory_percent"],
+            "記憶體",
+            f'{metrics["memory_used_gb"]:.1f}/{metrics["memory_total_gb"]:.1f} GB',
+            metric_color(metrics["memory_percent"], 80, 90),
+        )
+        draw_donut(
+            580,
+            180,
+            72,
+            metrics["disk_percent"],
+            "系統碟",
+            f'剩餘 {metrics["disk_free_gb"]:.1f} GB',
+            metric_color(metrics["disk_percent"], 80, 90),
+        )
+
+        panel = QRect(720, 86, 210, 222)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#18222d"))
+        painter.drawRoundedRect(panel, 12, 12)
+
+        painter.setPen(QColor("#9fb0bf"))
+        set_font(10)
+        painter.drawText(744, 122, "監控任務")
+        painter.setPen(QColor("#f4fbff"))
+        set_font(24, True)
+        painter.drawText(744, 158, f'{metrics["running_tasks"]}/{metrics["total_tasks"]}')
+
+        total_tasks = max(1, metrics["total_tasks"])
+        running_ratio = max(0.0, min(metrics["running_tasks"] / total_tasks, 1.0))
+        bar = QRect(744, 174, 158, 12)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#27313b"))
+        painter.drawRoundedRect(bar, 6, 6)
+        painter.setBrush(QColor("#38d98b"))
+        painter.drawRoundedRect(QRect(bar.x(), bar.y(), int(bar.width() * running_ratio), bar.height()), 6, 6)
+
+        painter.setPen(QColor("#9fb0bf"))
+        set_font(10)
+        painter.drawText(744, 222, "開機時間")
+        painter.setPen(QColor("#dbeafe"))
+        set_font(13, True)
+        painter.drawText(744, 248, metrics["uptime"])
+
+        painter.setPen(QColor("#9fb0bf"))
+        set_font(10)
+        painter.drawText(744, 278, "累計網路")
+        painter.setPen(QColor("#dbeafe"))
+        set_font(12, True)
+        painter.drawText(744, 302, f'↑ {metrics["net_sent_mb"]:.0f} MB / ↓ {metrics["net_recv_mb"]:.0f} MB')
+
+        painter.end()
+
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        return bytes(data)
+
+    def _format_duration(self, seconds: int) -> str:
+        days, rem = divmod(seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
+        if days:
+            return f"{days} 天 {hours} 小時 {minutes} 分"
+        return f"{hours} 小時 {minutes} 分"
+
+    def load_config(self) -> None:
+        if not self.config_path.exists():
+            self.restart_time.setTime(QTime.fromString("05:00", "HH:mm"))
+            return
+        try:
+            data = json.loads(self.config_path.read_text(encoding="utf-8"))
+            self.tasks = [MonitorTask.from_dict(item) for item in data.get("tasks", [])]
+            settings = data.get("settings", {})
+            self.restart_enabled.setChecked(bool(settings.get("restart_enabled", False)))
+            self.sidebar_collapsed = bool(settings.get("sidebar_collapsed", False))
+            self.discord_enabled = bool(settings.get("discord_enabled", False))
+            self.discord_status_title = str(settings.get("discord_status_title", DISCORD_STATUS_TITLE)).strip() or DISCORD_STATUS_TITLE
+            self.discord_webhook_url = str(settings.get("discord_webhook_url", ""))
+            self.discord_interval_minutes = max(1, int(settings.get("discord_interval_minutes", 5)))
+            self.discord_message_id = str(settings.get("discord_message_id", ""))
+            restart_time = str(settings.get("restart_time", "05:00"))
+            parsed_time = QTime.fromString(restart_time, "HH:mm")
+            self.restart_time.setTime(parsed_time if parsed_time.isValid() else QTime.fromString("05:00", "HH:mm"))
+            geometry = settings.get("window_geometry")
+            if isinstance(geometry, str) and geometry:
+                self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
+        except Exception as exc:
+            QMessageBox.warning(self, "設定讀取失敗", f"無法讀取設定，將使用空白設定：{exc}")
+            self.tasks = []
+
+    def save_config(self, capture_layout: bool = True) -> None:
+        if not hasattr(self, "config_path"):
+            return
+        if capture_layout:
+            self._capture_layout()
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "settings": {
+                "restart_enabled": self.restart_enabled.isChecked(),
+                "restart_time": self.restart_time.time().toString("HH:mm"),
+                "sidebar_collapsed": self.sidebar_collapsed,
+                "discord_enabled": self.discord_enabled,
+                "discord_status_title": self.discord_status_title,
+                "discord_webhook_url": self.discord_webhook_url,
+                "discord_interval_minutes": self.discord_interval_minutes,
+                "discord_message_id": self.discord_message_id,
+                "window_geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
+            },
+            "tasks": [task.to_dict() for task in self.tasks],
+        }
+        self.config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def closeEvent(self, event) -> None:
+        self.save_config()
+        for panel in self.panels.values():
+            panel.stop()
+        event.accept()
+
+    def _apply_dark_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QMainWindow, QWidget {
+                background: #111418;
+                color: #e6edf3;
+                font-family: "Microsoft JhengHei UI", "Microsoft JhengHei", "Segoe UI";
+                font-size: 10pt;
+            }
+            QToolBar {
+                background: #171b21;
+                border: 0;
+                spacing: 6px;
+                padding: 6px;
+            }
+            QGroupBox {
+                background: #151a20;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+                color: #8bd3ff;
+            }
+            QLabel#metricValue {
+                color: #b7f7c1;
+                font-weight: 600;
+            }
+            QToolButton, QPushButton {
+                background: #26313d;
+                color: #e6edf3;
+                border: 1px solid #3a4654;
+                border-radius: 4px;
+                padding: 5px 10px;
+            }
+            QToolButton:hover, QPushButton:hover {
+                background: #334152;
+            }
+            QLineEdit, QSpinBox, QTimeEdit, QListWidget {
+                background: #0d1117;
+                color: #e6edf3;
+                border: 1px solid #30363d;
+                selection-background-color: #1f6feb;
+            }
+            QListWidget::item {
+                padding: 8px;
+            }
+            QListWidget::item:selected {
+                background: #1f6feb;
+            }
+            QMdiArea {
+                background: #0b0f14;
+            }
+            QMdiSubWindow {
+                background: #151a20;
+                border: 1px solid #30363d;
+            }
+            QTextEdit#terminalOutput {
+                background: #05070a;
+                color: #b7f7c1;
+                border: 1px solid #26313d;
+                font-family: Consolas, "Cascadia Mono", monospace;
+                font-size: 10pt;
+            }
+            QLabel#statusLabel {
+                color: #8bd3ff;
+                padding: 0 8px;
+            }
+            QCheckBox {
+                spacing: 6px;
+            }
+            """
+        )
