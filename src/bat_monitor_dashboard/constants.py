@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 APP_NAME = "BatMonitorDashboard"
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.4"
 GITHUB_PROFILE_URL = "https://github.com/Kelu0427"
 GITHUB_REPOSITORY_URL = "https://github.com/Kelu0427/BatMonitorDashboardProject"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/Kelu0427/BatMonitorDashboardProject/releases/latest"
@@ -16,6 +16,14 @@ DEFAULT_LOG_MAX_MB = 20
 DISCORD_STATUS_TITLE = "交易監控主機狀態"
 DISCORD_CHART_TITLE = "交易監控即時狀態"
 DISCORD_FOOTER_TEXT = f"{APP_NAME} 會編輯同一則 Webhook 訊息，避免洗版"
+TEXT_COLOR_OPTIONS = [
+    ("預設", "default"),
+    ("紅色", "red"),
+    ("藍色", "blue"),
+    ("綠色", "green"),
+    ("琥珀", "amber"),
+    ("紫色", "violet"),
+]
 ANSI_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -~]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x07\x0b\x0c\x0e-\x1f\x7f]")
 

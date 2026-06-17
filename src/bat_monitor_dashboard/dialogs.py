@@ -33,6 +33,7 @@ from .constants import (
     DISCORD_STATUS_TITLE,
     GITHUB_PROFILE_URL,
     GITHUB_REPOSITORY_URL,
+    TEXT_COLOR_OPTIONS,
     resource_path,
     task_id,
 )
@@ -362,6 +363,7 @@ class AppSettingsDialog(QDialog):
         restart_time: QTime,
         auto_update_enabled: bool,
         theme_name: str,
+        text_color_name: str,
         layout_mode: str,
         log_memory_enabled: bool,
         log_max_mb: int,
@@ -393,6 +395,8 @@ class AppSettingsDialog(QDialog):
         self.layout_group = QButtonGroup(self)
         self.layout_radios: Dict[str, QRadioButton] = {}
         self.initial_theme_name = theme_name if theme_name in {"dark", "light", "warm"} else "dark"
+        valid_text_colors = {value for _, value in TEXT_COLOR_OPTIONS}
+        self.initial_text_color_name = text_color_name if text_color_name in valid_text_colors else "default"
         self.initial_layout_mode = (
             layout_mode
             if layout_mode in {"grid_auto", "grid_2", "vertical", "horizontal", "cascade"}
@@ -458,6 +462,7 @@ class AppSettingsDialog(QDialog):
         appearance_layout.setContentsMargins(10, 10, 10, 10)
         appearance_layout.setSpacing(10)
         appearance_layout.addWidget(self._build_theme_picker())
+        appearance_layout.addWidget(self._build_text_color_picker())
         appearance_layout.addWidget(self._build_layout_picker())
         appearance_layout.addStretch(1)
         self.tabs.addTab(appearance_tab, "外觀")
@@ -502,6 +507,7 @@ class AppSettingsDialog(QDialog):
             "restart_time": self.restart_time_edit.time(),
             "auto_update_enabled": self.auto_update_enabled_check.isChecked(),
             "theme_name": self._selected_theme_name(),
+            "text_color_name": self._selected_text_color_name(),
             "layout_mode": self._selected_layout_mode(),
             "log_memory_enabled": self.log_memory_enabled_check.isChecked(),
             "log_max_mb": self.log_max_mb_spin.value(),
@@ -533,6 +539,18 @@ class AppSettingsDialog(QDialog):
             card_layout.addWidget(preview)
             layout.addWidget(card)
         self.theme_radios.get(self.initial_theme_name, self.theme_radios["dark"]).setChecked(True)
+        return group
+
+    def _build_text_color_picker(self) -> QGroupBox:
+        group = QGroupBox("文字顏色")
+        group.setObjectName("settingsSection")
+        form = QFormLayout(group)
+        self.text_color_combo = QComboBox()
+        for label, value in TEXT_COLOR_OPTIONS:
+            self.text_color_combo.addItem(label, value)
+        selected_index = self.text_color_combo.findData(self.initial_text_color_name)
+        self.text_color_combo.setCurrentIndex(max(0, selected_index))
+        form.addRow("介面文字", self.text_color_combo)
         return group
 
     def _build_layout_picker(self) -> QGroupBox:
@@ -570,6 +588,10 @@ class AppSettingsDialog(QDialog):
             if radio.isChecked():
                 return value
         return "dark"
+
+    def _selected_text_color_name(self) -> str:
+        value = self.text_color_combo.currentData()
+        return str(value) if value else "default"
 
     def _selected_layout_mode(self) -> str:
         for value, radio in self.layout_radios.items():

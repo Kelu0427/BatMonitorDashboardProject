@@ -17,6 +17,7 @@ import psutil
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QRect, QSize, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QGridLayout,
@@ -48,6 +49,7 @@ from .constants import (
     GITHUB_LATEST_RELEASE_API,
     GITHUB_REPOSITORY_URL,
     RELEASE_ASSET_NAME,
+    TEXT_COLOR_OPTIONS,
     resource_path,
     user_config_path,
 )
@@ -75,6 +77,7 @@ class DashboardWindow(QMainWindow):
         self.last_restart_key = ""
         self.sidebar_collapsed = False
         self.theme_name = "dark"
+        self.text_color_name = "default"
         self.layout_mode = "grid_2"
         self.auto_update_enabled = True
         self.update_checking = False
@@ -185,6 +188,7 @@ class DashboardWindow(QMainWindow):
             self.restart_time.time(),
             self.auto_update_enabled,
             self.theme_name,
+            self.text_color_name,
             self.layout_mode,
             self.log_memory_enabled,
             self.log_max_mb,
@@ -202,8 +206,10 @@ class DashboardWindow(QMainWindow):
             old_auto_update_enabled = self.auto_update_enabled
             self.auto_update_enabled = dialog.result_settings["auto_update_enabled"]
             old_theme_name = self.theme_name
+            old_text_color_name = self.text_color_name
             old_layout_mode = self.layout_mode
             self.theme_name = dialog.result_settings["theme_name"]
+            self.text_color_name = dialog.result_settings["text_color_name"]
             self.layout_mode = dialog.result_settings["layout_mode"]
             self.log_memory_enabled = dialog.result_settings["log_memory_enabled"]
             self.log_max_mb = dialog.result_settings["log_max_mb"]
@@ -220,7 +226,7 @@ class DashboardWindow(QMainWindow):
                 self.discord_message_id = ""
             self.last_discord_sent_at = 0.0
             self.save_config()
-            if self.theme_name != old_theme_name:
+            if self.theme_name != old_theme_name or self.text_color_name != old_text_color_name:
                 self._apply_style()
             if self.layout_mode != old_layout_mode:
                 self.arrange_panels()
@@ -402,7 +408,7 @@ class DashboardWindow(QMainWindow):
     def check_for_updates(self, manual: bool = False) -> None:
         if self.update_checking:
             if manual:
-                QMessageBox.information(self, "檢查更新", "正在檢查更新，請稍候。")
+                QMessageBox.information(self._update_dialog_parent(), "檢查更新", "正在檢查更新，請稍候。")
             return
         self.update_checking = True
         thread = threading.Thread(target=self._check_for_updates_worker, args=(manual,), daemon=True)
@@ -461,8 +467,9 @@ class DashboardWindow(QMainWindow):
 
     def _handle_update_available(self, info: Dict) -> None:
         tag = str(info.get("tag", "")).strip()
+        parent = self._update_dialog_parent()
         result = QMessageBox.question(
-            self,
+            parent,
             "發現新版本",
             f"目前版本：v{APP_VERSION}\n最新版本：{tag}\n\n是否立即下載並安裝？",
             QMessageBox.Yes | QMessageBox.No,
@@ -476,7 +483,7 @@ class DashboardWindow(QMainWindow):
 
     def _handle_update_current(self, latest_tag: str) -> None:
         QMessageBox.information(
-            self,
+            self._update_dialog_parent(),
             "檢查更新",
             f"目前已是最新版。\n\n目前版本：v{APP_VERSION}\nGitHub 最新版：{latest_tag}",
         )
@@ -505,11 +512,21 @@ class DashboardWindow(QMainWindow):
         except Exception as exc:
             self.signals.update_failed.emit(f"下載更新失敗：{exc}", True)
 
+    def _update_dialog_parent(self) -> QWidget:
+        active_modal = QApplication.activeModalWidget()
+        if active_modal and active_modal is not self.update_progress_dialog:
+            return active_modal
+        active_window = QApplication.activeWindow()
+        if active_window and active_window is not self.update_progress_dialog:
+            return active_window
+        return self
+
     def _show_update_progress(self, tag: str) -> None:
         if self.update_progress_dialog:
             self.update_progress_dialog.close()
-        dialog = QProgressDialog(f"正在下載 {tag}...", "", 0, 100, self)
+        dialog = QProgressDialog(f"正在下載 {tag}...", "", 0, 100, self._update_dialog_parent())
         dialog.setWindowTitle("下載更新")
+        dialog.setWindowModality(Qt.ApplicationModal)
         dialog.setCancelButton(None)
         dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
@@ -517,6 +534,8 @@ class DashboardWindow(QMainWindow):
         dialog.setValue(0)
         self.update_progress_dialog = dialog
         dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _close_update_progress(self) -> None:
         if not self.update_progress_dialog:
@@ -547,11 +566,11 @@ class DashboardWindow(QMainWindow):
         self._close_update_progress()
         source = Path(downloaded_path)
         if not source.exists():
-            QMessageBox.warning(self, "更新失敗", "更新檔下載完成後找不到檔案。")
+            QMessageBox.warning(self._update_dialog_parent(), "更新失敗", "更新檔下載完成後找不到檔案。")
             return
         if getattr(sys, "frozen", False):
             QMessageBox.information(
-                self,
+                self._update_dialog_parent(),
                 "準備更新",
                 "更新檔已下載完成。\n按下確定後，程式會關閉、替換檔案並重新啟動。",
             )
@@ -565,7 +584,7 @@ class DashboardWindow(QMainWindow):
         target = dist_dir / RELEASE_ASSET_NAME
         source.replace(target)
         QMessageBox.information(
-            self,
+            self._update_dialog_parent(),
             "更新已下載",
             f"目前是原始碼執行模式，無法替換正在執行的 Python。\n\n"
             f"已將 {tag} 下載到：\n{target}",
@@ -595,7 +614,7 @@ class DashboardWindow(QMainWindow):
     def _handle_update_failed(self, message: str, manual: bool) -> None:
         self._close_update_progress()
         if manual:
-            QMessageBox.warning(self, "檢查更新", message)
+            QMessageBox.warning(self._update_dialog_parent(), "檢查更新", message)
             return
         print(message)
 
@@ -1130,6 +1149,10 @@ class DashboardWindow(QMainWindow):
             self.theme_name = str(settings.get("theme_name", "dark"))
             if self.theme_name not in {"dark", "light", "warm"}:
                 self.theme_name = "dark"
+            valid_text_colors = {value for _, value in TEXT_COLOR_OPTIONS}
+            self.text_color_name = str(settings.get("text_color_name", "default"))
+            if self.text_color_name not in valid_text_colors:
+                self.text_color_name = "default"
             self.layout_mode = str(settings.get("layout_mode", "grid_2"))
             if self.layout_mode not in {"grid_auto", "grid_2", "vertical", "horizontal", "cascade"}:
                 self.layout_mode = "grid_2"
@@ -1163,6 +1186,7 @@ class DashboardWindow(QMainWindow):
                 "restart_time": self.restart_time.time().toString("HH:mm"),
                 "sidebar_collapsed": self.sidebar_collapsed,
                 "theme_name": self.theme_name,
+                "text_color_name": self.text_color_name,
                 "layout_mode": self.layout_mode,
                 "auto_update_enabled": self.auto_update_enabled,
                 "log_memory_enabled": self.log_memory_enabled,
@@ -1200,6 +1224,51 @@ class DashboardWindow(QMainWindow):
                 panel.stop(wait=True)
                 panel.flush_log()
         event.accept()
+
+    def _text_color_styles(self) -> str:
+        if self.text_color_name == "default":
+            return ""
+        palettes = {
+            "dark": {
+                "red": "#ff7b72",
+                "blue": "#8bd3ff",
+                "green": "#b7f7c1",
+                "amber": "#f6c343",
+                "violet": "#d8b4fe",
+            },
+            "light": {
+                "red": "#cf222e",
+                "blue": "#0969da",
+                "green": "#116329",
+                "amber": "#9a6700",
+                "violet": "#8250df",
+            },
+            "warm": {
+                "red": "#b42318",
+                "blue": "#1d4ed8",
+                "green": "#15803d",
+                "amber": "#9a3412",
+                "violet": "#7e22ce",
+            },
+        }
+        theme_palette = palettes.get(self.theme_name, palettes["dark"])
+        color = theme_palette.get(self.text_color_name)
+        if not color:
+            return ""
+        return f"""
+            QMainWindow, QWidget, QLabel, QCheckBox, QRadioButton,
+            QGroupBox::title, QGroupBox#settingsSection::title,
+            QLabel#metricValue, QLabel#statusLabel, QLabel#aboutName, QLabel#footerText {{
+                color: {color};
+            }}
+            QToolButton, QPushButton, QLineEdit, QSpinBox, QTimeEdit, QListWidget, QComboBox,
+            QTextEdit#terminalOutput, QTabBar::tab {{
+                color: {color};
+            }}
+            QListWidget::item:selected, QTabBar::tab:selected {{
+                color: #ffffff;
+            }}
+        """
 
     def _apply_style(self) -> None:
         light_overrides = """
@@ -1581,5 +1650,6 @@ class DashboardWindow(QMainWindow):
             }
             """
             + theme_overrides
+            + self._text_color_styles()
         )
         self.mdi.setBackground(QBrush(QColor(mdi_background)))
