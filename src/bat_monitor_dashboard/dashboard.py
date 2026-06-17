@@ -83,6 +83,9 @@ class DashboardWindow(QMainWindow):
         self.update_checking = False
         self.updating_now = False
         self.update_progress_dialog: Optional[QProgressDialog] = None
+        self.active_settings_dialog: Optional[QDialog] = None
+        self.pending_update_source: Optional[Path] = None
+        self.pending_update_target: Optional[Path] = None
         self.log_memory_enabled = True
         self.log_max_mb = DEFAULT_LOG_MAX_MB
         self.discord_enabled = False
@@ -199,7 +202,13 @@ class DashboardWindow(QMainWindow):
             self.open_config_folder,
             self.check_for_updates_manual,
         )
-        if dialog.exec() == QDialog.Accepted and dialog.result_settings:
+        self.active_settings_dialog = dialog
+        try:
+            accepted = dialog.exec() == QDialog.Accepted and dialog.result_settings
+        finally:
+            if self.active_settings_dialog is dialog:
+                self.active_settings_dialog = None
+        if accepted:
             old_webhook_url = self.discord_webhook_url
             self.restart_enabled.setChecked(dialog.result_settings["restart_enabled"])
             self.restart_time.setTime(dialog.result_settings["restart_time"])
@@ -513,6 +522,8 @@ class DashboardWindow(QMainWindow):
             self.signals.update_failed.emit(f"下載更新失敗：{exc}", True)
 
     def _update_dialog_parent(self) -> QWidget:
+        if self.active_settings_dialog and self.active_settings_dialog.isVisible():
+            return self.active_settings_dialog
         active_modal = QApplication.activeModalWidget()
         if active_modal and active_modal is not self.update_progress_dialog:
             return active_modal
@@ -524,9 +535,11 @@ class DashboardWindow(QMainWindow):
     def _show_update_progress(self, tag: str) -> None:
         if self.update_progress_dialog:
             self.update_progress_dialog.close()
-        dialog = QProgressDialog(f"正在下載 {tag}...", "", 0, 100, self._update_dialog_parent())
+        parent = self._update_dialog_parent()
+        dialog = QProgressDialog(f"正在下載 {tag}...", "", 0, 100, parent)
         dialog.setWindowTitle("下載更新")
         dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         dialog.setCancelButton(None)
         dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
@@ -569,14 +582,14 @@ class DashboardWindow(QMainWindow):
             QMessageBox.warning(self._update_dialog_parent(), "更新失敗", "更新檔下載完成後找不到檔案。")
             return
         if getattr(sys, "frozen", False):
-            QMessageBox.information(
-                self._update_dialog_parent(),
-                "準備更新",
-                "更新檔已下載完成。\n按下確定後，程式會關閉、替換檔案並重新啟動。",
-            )
-            self.updating_now = True
-            self._launch_updater(source, Path(sys.executable))
-            self.close()
+            target = Path(sys.executable)
+            if self._confirm_update_restart(tag):
+                self.updating_now = True
+                self._launch_updater(source, target)
+                self.close()
+                return
+            self.pending_update_source = source
+            self.pending_update_target = target
             return
 
         dist_dir = Path.cwd() / "dist"
@@ -589,6 +602,23 @@ class DashboardWindow(QMainWindow):
             f"目前是原始碼執行模式，無法替換正在執行的 Python。\n\n"
             f"已將 {tag} 下載到：\n{target}",
         )
+
+    def _confirm_update_restart(self, tag: str) -> bool:
+        box = QMessageBox(self._update_dialog_parent())
+        box.setWindowTitle("準備更新")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"{tag} 更新檔已下載完成。")
+        box.setInformativeText("立即重啟會關閉程式、替換檔案並重新啟動。\n選擇稍後重啟時，程式會在下次關閉時套用更新。")
+        restart_button = box.addButton("立即重啟更新", QMessageBox.AcceptRole)
+        box.addButton("稍後重啟", QMessageBox.RejectRole)
+        box.setDefaultButton(restart_button)
+        box.setWindowModality(Qt.ApplicationModal)
+        box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        box.show()
+        box.raise_()
+        box.activateWindow()
+        box.exec()
+        return box.clickedButton() is restart_button
 
     def _launch_updater(self, source: Path, target: Path) -> None:
         updater = Path(tempfile.gettempdir()) / f"{APP_NAME}-update.bat"
@@ -1223,6 +1253,16 @@ class DashboardWindow(QMainWindow):
             if not self.log_memory_enabled:
                 panel.stop(wait=True)
                 panel.flush_log()
+        if (
+            self.pending_update_source
+            and self.pending_update_target
+            and self.pending_update_source.exists()
+            and getattr(sys, "frozen", False)
+        ):
+            self.updating_now = True
+            self._launch_updater(self.pending_update_source, self.pending_update_target)
+            self.pending_update_source = None
+            self.pending_update_target = None
         event.accept()
 
     def _text_color_styles(self) -> str:
