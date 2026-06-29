@@ -44,6 +44,7 @@ class MonitorPanel(QWidget):
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("輸入指令後按 Enter")
         self.input_edit.setEnabled(False)
+        self.input_edit.setVisible(False)
         self.input_edit.returnPressed.connect(self._send_input)
 
         top = QHBoxLayout()
@@ -131,6 +132,7 @@ class MonitorPanel(QWidget):
             ["cmd", "/c", "call", str(bat_path), *self._bat_arguments()],
             self._working_directory(bat_path) or str(bat_path.parent),
             self._display_command(bat_path),
+            interactive=False,
         )
 
     def _start_detached_with_log(self, bat_path: Path) -> None:
@@ -159,9 +161,9 @@ class MonitorPanel(QWidget):
         self.log_tail_timer.start(1000)
 
     def _start_embedded_shell(self, workdir: str) -> None:
-        self._start_embedded_process(["cmd", "/K"], workdir, f"cmd /K ({workdir})")
+        self._start_embedded_process(["cmd", "/K"], workdir, f"cmd /K ({workdir})", interactive=True)
 
-    def _start_embedded_process(self, command: List[str], workdir: str, display_command: str) -> None:
+    def _start_embedded_process(self, command: List[str], workdir: str, display_command: str, interactive: bool) -> None:
         self.process = QProcess(self)
         self.process.setProgram(command[0])
         self.process.setArguments(command[1:])
@@ -182,7 +184,8 @@ class MonitorPanel(QWidget):
         self.process.errorOccurred.connect(self._error)
         self.process.start()
         self.status_label.setText("執行中")
-        self.input_edit.setEnabled(True)
+        self.input_edit.setVisible(interactive)
+        self.input_edit.setEnabled(interactive)
         self.append_line(f"[dashboard] 啟動：{display_command}")
 
     def _start_shell_window(self, workdir: str) -> None:
@@ -582,10 +585,12 @@ class MonitorPanel(QWidget):
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         self.input_edit.setEnabled(False)
+        self.input_edit.setVisible(False)
         self.status_label.setText(f"已停止 ({exit_code})")
         self.append_line(f"[dashboard] 任務已停止，結束代碼：{exit_code}")
 
     def _error(self, error: QProcess.ProcessError) -> None:
         self.input_edit.setEnabled(False)
+        self.input_edit.setVisible(False)
         self.status_label.setText("錯誤")
         self.append_line(f"[dashboard] process 錯誤：{error}")
