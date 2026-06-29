@@ -64,7 +64,7 @@ class TaskDialog(QDialog):
         self.workdir_edit.setPlaceholderText("BAT 路徑留空時必填")
         self.auto_start_check = QCheckBox("啟動儀表板時自動執行")
         self.auto_start_check.setChecked(task.auto_start if task else True)
-        self.inline_launch_check = QCheckBox("不開啟新視窗（以 --inline 執行）")
+        self.inline_launch_check = QCheckBox("不開啟新視窗（BAT 以 --inline 執行，工作目錄使用內嵌命令列）")
         self.inline_launch_check.setChecked(task.inline_launch if task else False)
         self.kill_port_check = QCheckBox("啟動前關閉指定 Port")
         self.kill_port_check.setChecked(task.kill_port_before_start if task else False)
@@ -395,6 +395,7 @@ class AppSettingsDialog(QDialog):
         status_title: str,
         open_config_callback,
         check_update_callback,
+        rollback_callback,
     ):
         super().__init__(parent)
         self.setWindowTitle("設定")
@@ -403,6 +404,7 @@ class AppSettingsDialog(QDialog):
         self.result_settings: Optional[Dict] = None
         self.open_config_callback = open_config_callback
         self.check_update_callback = check_update_callback
+        self.rollback_callback = rollback_callback
 
         self.restart_enabled_check = QCheckBox("每日定時全部重啟")
         self.restart_enabled_check.setChecked(restart_enabled)
@@ -448,6 +450,8 @@ class AppSettingsDialog(QDialog):
         config_btn.clicked.connect(self.open_config_callback)
         check_update_btn = QPushButton("立即檢查更新")
         check_update_btn.clicked.connect(self.check_update_callback)
+        rollback_btn = QPushButton("選擇退版版本")
+        rollback_btn.clicked.connect(self.rollback_callback)
 
         self.tabs = QTabWidget()
 
@@ -467,6 +471,7 @@ class AppSettingsDialog(QDialog):
         update_form = QFormLayout(update_group)
         update_form.addRow("", self.auto_update_enabled_check)
         update_form.addRow("手動更新", check_update_btn)
+        update_form.addRow("退版", rollback_btn)
 
         config_group = QGroupBox("設定檔")
         config_group.setObjectName("settingsSection")

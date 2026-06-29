@@ -7,7 +7,7 @@ from typing import List, Optional
 import psutil
 from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
 from PySide6.QtGui import QTextCursor
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
 from .constants import ANSI_PATTERN, CONTROL_CHAR_PATTERN, console_encoding, user_config_path
 from .models import MonitorTask
@@ -41,6 +41,10 @@ class MonitorPanel(QWidget):
         self.output.setReadOnly(True)
         self.output.setLineWrapMode(QTextEdit.NoWrap)
         self.output.setObjectName("terminalOutput")
+        self.input_edit = QLineEdit()
+        self.input_edit.setPlaceholderText("輸入指令後按 Enter")
+        self.input_edit.setEnabled(False)
+        self.input_edit.returnPressed.connect(self._send_input)
 
         top = QHBoxLayout()
         top.addWidget(QLabel(task.name))
@@ -56,6 +60,7 @@ class MonitorPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addLayout(top)
         layout.addWidget(self.output, 1)
+        layout.addWidget(self.input_edit)
 
         self.edit_btn.clicked.connect(self._edit)
         self.start_btn.clicked.connect(self.start)
@@ -105,7 +110,10 @@ class MonitorPanel(QWidget):
                 self.status_label.setText("工作目錄不存在")
                 return
             self._kill_port_before_start()
-            self._start_shell_window(workdir)
+            if self.task.inline_launch:
+                self._start_embedded_shell(workdir)
+            else:
+                self._start_shell_window(workdir)
             return
 
         bat_path = Path(bat_path_text)
@@ -115,31 +123,15 @@ class MonitorPanel(QWidget):
             return
         self._kill_port_before_start()
 
-        if self.log_memory_enabled:
+        if self.log_memory_enabled and not self.task.inline_launch:
             self._start_detached_with_log(bat_path)
             return
 
-        self.process = QProcess(self)
-        self.process.setProgram("cmd")
-        self.process.setArguments(["/c", "call", str(bat_path), *self._bat_arguments()])
-        self.process.setWorkingDirectory(self._working_directory(bat_path) or str(bat_path.parent))
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert("PYTHONUNBUFFERED", "1")
-        env.insert("NO_COLOR", "1")
-        env.insert("FORCE_COLOR", "0")
-        env.insert("NPM_CONFIG_COLOR", "false")
-        env.insert("npm_config_color", "false")
-        env.insert("VUE_CLI_PROGRESS", "false")
-        env.insert("WEBPACK_PROGRESS", "false")
-        env.insert("TERM", "dumb")
-        self.process.setProcessEnvironment(env)
-        self.process.setProcessChannelMode(QProcess.MergedChannels)
-        self.process.readyReadStandardOutput.connect(self._read_output)
-        self.process.finished.connect(self._finished)
-        self.process.errorOccurred.connect(self._error)
-        self.process.start()
-        self.status_label.setText("執行中")
-        self.append_line(f"[dashboard] 啟動：{self._display_command(bat_path)}")
+        self._start_embedded_process(
+            ["cmd", "/c", "call", str(bat_path), *self._bat_arguments()],
+            self._working_directory(bat_path) or str(bat_path.parent),
+            self._display_command(bat_path),
+        )
 
     def _start_detached_with_log(self, bat_path: Path) -> None:
         env = self._process_environment()
@@ -165,6 +157,33 @@ class MonitorPanel(QWidget):
         self.log_read_pos = self.log_path.stat().st_size if self.log_path.exists() else 0
         self.status_label.setText("執行中")
         self.log_tail_timer.start(1000)
+
+    def _start_embedded_shell(self, workdir: str) -> None:
+        self._start_embedded_process(["cmd", "/K"], workdir, f"cmd /K ({workdir})")
+
+    def _start_embedded_process(self, command: List[str], workdir: str, display_command: str) -> None:
+        self.process = QProcess(self)
+        self.process.setProgram(command[0])
+        self.process.setArguments(command[1:])
+        self.process.setWorkingDirectory(workdir)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUNBUFFERED", "1")
+        env.insert("NO_COLOR", "1")
+        env.insert("FORCE_COLOR", "0")
+        env.insert("NPM_CONFIG_COLOR", "false")
+        env.insert("npm_config_color", "false")
+        env.insert("VUE_CLI_PROGRESS", "false")
+        env.insert("WEBPACK_PROGRESS", "false")
+        env.insert("TERM", "dumb")
+        self.process.setProcessEnvironment(env)
+        self.process.setProcessChannelMode(QProcess.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self._read_output)
+        self.process.finished.connect(self._finished)
+        self.process.errorOccurred.connect(self._error)
+        self.process.start()
+        self.status_label.setText("執行中")
+        self.input_edit.setEnabled(True)
+        self.append_line(f"[dashboard] 啟動：{display_command}")
 
     def _start_shell_window(self, workdir: str) -> None:
         self.append_line(f"[dashboard] 開啟命令列工作目錄：{workdir}")
@@ -285,6 +304,14 @@ class MonitorPanel(QWidget):
                 self.detached_process = None
                 self._clear_pid_file()
                 QTimer.singleShot(1200, lambda: self.status_label.setText("已停止"))
+
+    def _send_input(self) -> None:
+        text = self.input_edit.text()
+        if not text or not self.process or self.process.state() == QProcess.NotRunning:
+            return
+        self.input_edit.clear()
+        self.append_line(f"> {text}")
+        self.process.write((text + "\r\n").encode(console_encoding(), errors="replace"))
 
     def restart(self) -> None:
         self.stop()
@@ -554,9 +581,11 @@ class MonitorPanel(QWidget):
             cursor.deleteChar()
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.input_edit.setEnabled(False)
         self.status_label.setText(f"已停止 ({exit_code})")
         self.append_line(f"[dashboard] 任務已停止，結束代碼：{exit_code}")
 
     def _error(self, error: QProcess.ProcessError) -> None:
+        self.input_edit.setEnabled(False)
         self.status_label.setText("錯誤")
         self.append_line(f"[dashboard] process 錯誤：{error}")

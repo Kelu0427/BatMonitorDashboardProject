@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -201,6 +202,7 @@ class DashboardWindow(QMainWindow):
             self.discord_status_title,
             self.open_config_folder,
             self.check_for_updates_manual,
+            self.rollback_to_release,
         )
         self.active_settings_dialog = dialog
         try:
@@ -413,6 +415,67 @@ class DashboardWindow(QMainWindow):
 
     def check_for_updates_manual(self) -> None:
         self.check_for_updates(manual=True)
+
+    def rollback_to_release(self) -> None:
+        try:
+            releases = self._fetch_releases()
+        except Exception as exc:
+            QMessageBox.warning(self._update_dialog_parent(), "退版失敗", f"無法讀取版本清單：{exc}")
+            return
+        choices = []
+        releases_by_label = {}
+        current_version = self._version_tuple(APP_VERSION)
+        for release in releases:
+            tag = str(release.get("tag_name", "")).strip()
+            if not tag or self._version_tuple(tag) >= current_version:
+                continue
+            asset_url = self._release_asset_url(release)
+            if not asset_url:
+                continue
+            label = tag
+            published_at = str(release.get("published_at", "")).strip()
+            if published_at:
+                label = f"{tag}  ({published_at[:10]})"
+            choices.append(label)
+            releases_by_label[label] = {"tag": tag, "asset_url": asset_url}
+        if not choices:
+            QMessageBox.information(self._update_dialog_parent(), "退版", "沒有找到可退版的歷史版本。")
+            return
+        selected, ok = QInputDialog.getItem(
+            self._update_dialog_parent(),
+            "選擇退版版本",
+            "版本",
+            choices,
+            0,
+            False,
+        )
+        if not ok or not selected:
+            return
+        info = releases_by_label[selected]
+        result = QMessageBox.question(
+            self._update_dialog_parent(),
+            "確認退版",
+            f"目前版本：v{APP_VERSION}\n退回版本：{info['tag']}\n\n是否下載並準備退版？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result != QMessageBox.Yes:
+            return
+        self._show_update_progress(str(info["tag"]))
+        thread = threading.Thread(target=self._download_update_worker, args=(info,), daemon=True)
+        thread.start()
+
+    def _fetch_releases(self) -> List[Dict]:
+        releases_api = GITHUB_LATEST_RELEASE_API.rsplit("/latest", 1)[0]
+        request = urllib.request.Request(
+            releases_api,
+            headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+        )
+        with urllib.request.urlopen(request, timeout=12) as response:
+            data = json.loads(response.read().decode("utf-8", errors="replace"))
+        if not isinstance(data, list):
+            return []
+        return data
 
     def check_for_updates(self, manual: bool = False) -> None:
         if self.update_checking:
