@@ -97,11 +97,23 @@ class MonitorPanel(QWidget):
             self.append_line("[dashboard] 任務已在執行中。")
             return
 
-        bat_path = Path(self.task.bat_path)
+        bat_path_text = self.task.bat_path.strip()
+        if not bat_path_text:
+            workdir = self._working_directory(None)
+            if not workdir:
+                self.append_line("[dashboard] 純工作目錄模式需要設定工作目錄。")
+                self.status_label.setText("工作目錄不存在")
+                return
+            self._kill_port_before_start()
+            self._start_shell_window(workdir)
+            return
+
+        bat_path = Path(bat_path_text)
         if not bat_path.exists():
             self.append_line(f"[dashboard] BAT 不存在：{self.task.bat_path}")
             self.status_label.setText("檔案不存在")
             return
+        self._kill_port_before_start()
 
         if self.log_memory_enabled:
             self._start_detached_with_log(bat_path)
@@ -109,8 +121,8 @@ class MonitorPanel(QWidget):
 
         self.process = QProcess(self)
         self.process.setProgram("cmd")
-        self.process.setArguments(["/c", "call", str(bat_path)])
-        self.process.setWorkingDirectory(self.task.workdir or str(bat_path.parent))
+        self.process.setArguments(["/c", "call", str(bat_path), *self._bat_arguments()])
+        self.process.setWorkingDirectory(self._working_directory(bat_path) or str(bat_path.parent))
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONUNBUFFERED", "1")
         env.insert("NO_COLOR", "1")
@@ -127,21 +139,21 @@ class MonitorPanel(QWidget):
         self.process.errorOccurred.connect(self._error)
         self.process.start()
         self.status_label.setText("執行中")
-        self.append_line(f"[dashboard] 啟動：{bat_path}")
+        self.append_line(f"[dashboard] 啟動：{self._display_command(bat_path)}")
 
     def _start_detached_with_log(self, bat_path: Path) -> None:
         env = self._process_environment()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._clear_log_if_over_limit()
-        self.append_line(f"[dashboard] 啟動：{bat_path}")
+        self.append_line(f"[dashboard] 啟動：{self._display_command(bat_path)}")
         self.flush_log()
 
         create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         create_new_process_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         with self.log_path.open("ab") as log_file:
             self.detached_process = subprocess.Popen(
-                ["cmd", "/c", "call", str(bat_path)],
-                cwd=self.task.workdir or str(bat_path.parent),
+                ["cmd", "/c", "call", str(bat_path), *self._bat_arguments()],
+                cwd=self._working_directory(bat_path) or str(bat_path.parent),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
@@ -153,6 +165,80 @@ class MonitorPanel(QWidget):
         self.log_read_pos = self.log_path.stat().st_size if self.log_path.exists() else 0
         self.status_label.setText("執行中")
         self.log_tail_timer.start(1000)
+
+    def _start_shell_window(self, workdir: str) -> None:
+        self.append_line(f"[dashboard] 開啟命令列工作目錄：{workdir}")
+        self.flush_log()
+        create_new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
+        create_new_process_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        self.detached_process = subprocess.Popen(
+            ["cmd", "/k"],
+            cwd=workdir,
+            creationflags=create_new_console | create_new_process_group,
+        )
+        self.detached_pid = int(self.detached_process.pid)
+        self.pid_path.write_text(str(self.detached_pid), encoding="ascii")
+        self.status_label.setText("執行中")
+
+    def _bat_arguments(self) -> List[str]:
+        return ["--inline"] if self.task.inline_launch else []
+
+    def _working_directory(self, bat_path: Optional[Path]) -> str:
+        workdir = self.task.workdir.strip()
+        if not workdir and bat_path:
+            workdir = str(bat_path.parent)
+        if not workdir or not Path(workdir).exists():
+            return ""
+        return workdir
+
+    def _display_command(self, bat_path: Path) -> str:
+        args = self._bat_arguments()
+        if not args:
+            return str(bat_path)
+        return f"{bat_path} {' '.join(args)}"
+
+    def _kill_port_before_start(self) -> None:
+        if not self.task.kill_port_before_start or self.task.kill_port <= 0:
+            return
+        port = self.task.kill_port
+        pids = self._listening_pids_on_port(port)
+        if not pids:
+            self.append_line(f"[dashboard] Port {port} 未找到執行中的 LISTENING process。")
+            return
+        create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        for pid in sorted(pids):
+            if pid == os.getpid():
+                continue
+            self.append_line(f"[dashboard] 關閉 Port {port} process tree：PID {pid}")
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=create_no_window,
+                    timeout=8,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                self.append_line(f"[dashboard] 關閉 Port {port} 逾時：PID {pid}")
+
+    def _listening_pids_on_port(self, port: int) -> set[int]:
+        pids = set()
+        try:
+            connections = psutil.net_connections(kind="inet")
+        except (psutil.AccessDenied, OSError) as exc:
+            self.append_line(f"[dashboard] 無法掃描 Port {port}：{exc}")
+            return pids
+        for connection in connections:
+            local_address = connection.laddr
+            if (
+                connection.status == psutil.CONN_LISTEN
+                and local_address
+                and local_address.port == port
+                and connection.pid
+            ):
+                pids.add(int(connection.pid))
+        return pids
 
     def stop(self, wait: bool = False) -> None:
         if not self.is_running():

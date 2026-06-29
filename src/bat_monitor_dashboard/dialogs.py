@@ -53,15 +53,27 @@ class TaskDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("編輯監控任務")
         self.setModal(True)
-        self.resize(560, 260)
+        self.resize(620, 340)
         self.result_task: Optional[MonitorTask] = None
         self.original_task = task
 
         self.name_edit = QLineEdit(task.name if task else "")
         self.bat_edit = QLineEdit(task.bat_path if task else "")
         self.workdir_edit = QLineEdit(task.workdir if task else "")
+        self.bat_edit.setPlaceholderText("可留空；留空時會在工作目錄開啟命令列")
+        self.workdir_edit.setPlaceholderText("BAT 路徑留空時必填")
         self.auto_start_check = QCheckBox("啟動儀表板時自動執行")
         self.auto_start_check.setChecked(task.auto_start if task else True)
+        self.inline_launch_check = QCheckBox("不開啟新視窗（以 --inline 執行）")
+        self.inline_launch_check.setChecked(task.inline_launch if task else False)
+        self.kill_port_check = QCheckBox("啟動前關閉指定 Port")
+        self.kill_port_check.setChecked(task.kill_port_before_start if task else False)
+        self.kill_port_spin = QSpinBox()
+        self.kill_port_spin.setRange(1, 65535)
+        self.kill_port_spin.setValue(task.kill_port if task and task.kill_port else 9000)
+        self.kill_port_spin.setMinimumWidth(110)
+        self.kill_port_spin.setEnabled(self.kill_port_check.isChecked())
+        self.kill_port_check.toggled.connect(self.kill_port_spin.setEnabled)
         self.max_lines_spin = QSpinBox()
         self.max_lines_spin.setRange(100, 50000)
         self.max_lines_spin.setSingleStep(500)
@@ -75,6 +87,10 @@ class TaskDialog(QDialog):
         self.log_max_mb_spin.setMinimumWidth(110)
         max_lines_row = build_spin_row(self.max_lines_spin)
         log_max_mb_row = build_spin_row(self.log_max_mb_spin)
+        kill_port_row = QHBoxLayout()
+        kill_port_row.addWidget(self.kill_port_check)
+        kill_port_row.addWidget(self.kill_port_spin)
+        kill_port_row.addStretch(1)
 
         self.encoding_combo = QComboBox()
         self.encoding_combo.addItems(["utf-8", "cp950", "big5", "系統預設"])
@@ -103,6 +119,8 @@ class TaskDialog(QDialog):
         form.addRow("保留最近行數", max_lines_row)
         form.addRow("Log 檔案上限", log_max_mb_row)
         form.addRow("輸出編碼", self.encoding_combo)
+        form.addRow("", self.inline_launch_check)
+        form.addRow("Port 清理", kill_port_row)
         form.addRow("", self.auto_start_check)
 
         save_btn = QPushButton("儲存")
@@ -138,14 +156,15 @@ class TaskDialog(QDialog):
         if not name:
             QMessageBox.warning(self, "欄位錯誤", "請輸入任務名稱。")
             return
-        if not bat_path:
-            QMessageBox.warning(self, "欄位錯誤", "請選擇 BAT 路徑。")
-            return
-        if not Path(bat_path).exists():
+        if bat_path and not Path(bat_path).exists():
             QMessageBox.warning(self, "檔案不存在", "BAT 檔案不存在，請確認路徑。")
             return
         if not workdir:
-            workdir = str(Path(bat_path).parent)
+            if bat_path:
+                workdir = str(Path(bat_path).parent)
+            else:
+                QMessageBox.warning(self, "欄位錯誤", "純工作目錄模式請選擇工作目錄。")
+                return
         if not Path(workdir).exists():
             QMessageBox.warning(self, "資料夾不存在", "工作目錄不存在，請確認路徑。")
             return
@@ -160,6 +179,9 @@ class TaskDialog(QDialog):
             max_lines=self.max_lines_spin.value(),
             log_max_mb=self.log_max_mb_spin.value(),
             output_encoding=self.encoding_combo.currentText(),
+            inline_launch=self.inline_launch_check.isChecked(),
+            kill_port_before_start=self.kill_port_check.isChecked(),
+            kill_port=self.kill_port_spin.value() if self.kill_port_check.isChecked() else 0,
             geometry=geometry,
         )
         self.accept()

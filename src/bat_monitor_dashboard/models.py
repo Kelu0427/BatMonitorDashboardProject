@@ -15,6 +15,9 @@ class MonitorTask:
     max_lines: int
     log_max_mb: int
     output_encoding: str
+    inline_launch: bool
+    kill_port_before_start: bool
+    kill_port: int
     geometry: Dict[str, int]
 
     @classmethod
@@ -34,6 +37,9 @@ class MonitorTask:
             max_lines=max(100, int(data.get("max_lines", 3000))),
             log_max_mb=max(1, int(data.get("log_max_mb", DEFAULT_LOG_MAX_MB))),
             output_encoding=str(data.get("output_encoding", "utf-8")).strip() or "utf-8",
+            inline_launch=bool(data.get("inline_launch", False)),
+            kill_port_before_start=bool(data.get("kill_port_before_start", False)),
+            kill_port=max(0, min(65535, int(data.get("kill_port", 0)))),
             geometry={
                 "x": int(geometry.get("x", DEFAULT_GEOMETRY["x"])),
                 "y": int(geometry.get("y", DEFAULT_GEOMETRY["y"])),
