@@ -76,6 +76,7 @@ class DashboardWindow(QMainWindow):
         self.panels: Dict[str, MonitorPanel] = {}
         self.windows: Dict[str, QMdiSubWindow] = {}
         self.last_restart_key = ""
+        self.restart_times = ["05:00"]
         self.sidebar_collapsed = False
         self.theme_name = "dark"
         self.text_color_name = "default"
@@ -189,7 +190,7 @@ class DashboardWindow(QMainWindow):
         dialog = AppSettingsDialog(
             self,
             self.restart_enabled.isChecked(),
-            self.restart_time.time(),
+            self.restart_times,
             self.auto_update_enabled,
             self.theme_name,
             self.text_color_name,
@@ -213,7 +214,11 @@ class DashboardWindow(QMainWindow):
         if accepted:
             old_webhook_url = self.discord_webhook_url
             self.restart_enabled.setChecked(dialog.result_settings["restart_enabled"])
-            self.restart_time.setTime(dialog.result_settings["restart_time"])
+            self.restart_times = dialog.result_settings["restart_times"]
+            if self.restart_times:
+                parsed_restart_time = QTime.fromString(self.restart_times[0], "HH:mm")
+                if parsed_restart_time.isValid():
+                    self.restart_time.setTime(parsed_restart_time)
             old_auto_update_enabled = self.auto_update_enabled
             self.auto_update_enabled = dialog.result_settings["auto_update_enabled"]
             old_theme_name = self.theme_name
@@ -868,8 +873,8 @@ class DashboardWindow(QMainWindow):
         if not self.restart_enabled.isChecked():
             return
         now = datetime.now()
-        target = self.restart_time.time().toString("HH:mm")
-        if now.strftime("%H:%M") != target:
+        current_time = now.strftime("%H:%M")
+        if current_time not in set(self.restart_times):
             return
         key = now.strftime("%Y%m%d%H%M")
         if key == self.last_restart_key:
@@ -1232,6 +1237,7 @@ class DashboardWindow(QMainWindow):
     def load_config(self) -> None:
         if not self.config_path.exists():
             self.restart_time.setTime(QTime.fromString("05:00", "HH:mm"))
+            self.restart_times = ["05:00"]
             return
         try:
             data = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -1257,7 +1263,8 @@ class DashboardWindow(QMainWindow):
             self.discord_webhook_url = str(settings.get("discord_webhook_url", ""))
             self.discord_interval_minutes = max(1, int(settings.get("discord_interval_minutes", 5)))
             self.discord_message_id = str(settings.get("discord_message_id", ""))
-            restart_time = str(settings.get("restart_time", "05:00"))
+            self.restart_times = self._load_restart_times(settings)
+            restart_time = self.restart_times[0] if self.restart_times else "05:00"
             parsed_time = QTime.fromString(restart_time, "HH:mm")
             self.restart_time.setTime(parsed_time if parsed_time.isValid() else QTime.fromString("05:00", "HH:mm"))
             geometry = settings.get("window_geometry")
@@ -1276,7 +1283,8 @@ class DashboardWindow(QMainWindow):
         data = {
             "settings": {
                 "restart_enabled": self.restart_enabled.isChecked(),
-                "restart_time": self.restart_time.time().toString("HH:mm"),
+                "restart_time": self.restart_times[0] if self.restart_times else "05:00",
+                "restart_times": self.restart_times,
                 "sidebar_collapsed": self.sidebar_collapsed,
                 "theme_name": self.theme_name,
                 "text_color_name": self.text_color_name,
@@ -1294,6 +1302,19 @@ class DashboardWindow(QMainWindow):
             "tasks": [task.to_dict() for task in self.tasks],
         }
         self.config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_restart_times(self, settings: Dict) -> List[str]:
+        raw_times = settings.get("restart_times")
+        candidates = raw_times if isinstance(raw_times, list) else [settings.get("restart_time", "05:00")]
+        restart_times: List[str] = []
+        for value in candidates:
+            parsed_time = QTime.fromString(str(value), "HH:mm")
+            if not parsed_time.isValid():
+                continue
+            time_text = parsed_time.toString("HH:mm")
+            if time_text not in restart_times:
+                restart_times.append(time_text)
+        return sorted(restart_times) or ["05:00"]
 
     def closeEvent(self, event) -> None:
         running_count = sum(1 for panel in self.panels.values() if panel.is_running())

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -382,7 +383,7 @@ class AppSettingsDialog(QDialog):
         self,
         parent: QWidget,
         restart_enabled: bool,
-        restart_time: QTime,
+        restart_times: list[str],
         auto_update_enabled: bool,
         theme_name: str,
         text_color_name: str,
@@ -411,7 +412,15 @@ class AppSettingsDialog(QDialog):
         self.restart_time_edit = QTimeEdit()
         self.restart_time_edit.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.restart_time_edit.setDisplayFormat("HH:mm")
-        self.restart_time_edit.setTime(restart_time)
+        self.restart_time_edit.setTime(QTime.fromString("05:00", "HH:mm"))
+        self.restart_times_list = QListWidget()
+        self.restart_times_list.setMinimumHeight(86)
+        for restart_time in restart_times or ["05:00"]:
+            parsed_time = QTime.fromString(str(restart_time), "HH:mm")
+            if parsed_time.isValid():
+                self._add_restart_time(parsed_time.toString("HH:mm"))
+        if self.restart_times_list.count() == 0:
+            self._add_restart_time("05:00")
         self.auto_update_enabled_check = QCheckBox("自動檢查更新")
         self.auto_update_enabled_check.setChecked(auto_update_enabled)
         self.theme_group = QButtonGroup(self)
@@ -463,8 +472,18 @@ class AppSettingsDialog(QDialog):
         schedule_group = QGroupBox("啟動與排程")
         schedule_group.setObjectName("settingsSection")
         schedule_form = QFormLayout(schedule_group)
+        add_restart_btn = QPushButton("新增")
+        add_restart_btn.clicked.connect(self._add_restart_time_from_editor)
+        remove_restart_btn = QPushButton("刪除選取")
+        remove_restart_btn.clicked.connect(self._remove_selected_restart_time)
+        restart_time_row = QHBoxLayout()
+        restart_time_row.addWidget(self.restart_time_edit)
+        restart_time_row.addWidget(add_restart_btn)
+        restart_time_row.addWidget(remove_restart_btn)
+        restart_time_row.addStretch(1)
         schedule_form.addRow("", self.restart_enabled_check)
-        schedule_form.addRow("重啟時間", self.restart_time_edit)
+        schedule_form.addRow("新增時間", restart_time_row)
+        schedule_form.addRow("排程時間", self.restart_times_list)
 
         update_group = QGroupBox("更新")
         update_group.setObjectName("settingsSection")
@@ -529,9 +548,13 @@ class AppSettingsDialog(QDialog):
         if self.tabs.currentWidget() is self.discord_tab and self.discord_enabled_check.isChecked() and not webhook_url:
             QMessageBox.warning(self, "欄位錯誤", "啟用 Discord 通知時，請輸入 Webhook URL。")
             return
+        restart_times = self._restart_times()
+        if self.restart_enabled_check.isChecked() and not restart_times:
+            QMessageBox.warning(self, "欄位錯誤", "啟用定時重啟時，請至少新增一個重啟時間。")
+            return
         self.result_settings = {
             "restart_enabled": self.restart_enabled_check.isChecked(),
-            "restart_time": self.restart_time_edit.time(),
+            "restart_times": restart_times,
             "auto_update_enabled": self.auto_update_enabled_check.isChecked(),
             "theme_name": self._selected_theme_name(),
             "text_color_name": self._selected_text_color_name(),
@@ -544,6 +567,24 @@ class AppSettingsDialog(QDialog):
             "interval_minutes": self.interval_spin.value(),
         }
         self.accept()
+
+    def _add_restart_time(self, time_text: str) -> None:
+        existing = {self.restart_times_list.item(index).text() for index in range(self.restart_times_list.count())}
+        if time_text in existing:
+            return
+        self.restart_times_list.addItem(time_text)
+        self.restart_times_list.sortItems()
+
+    def _add_restart_time_from_editor(self) -> None:
+        self._add_restart_time(self.restart_time_edit.time().toString("HH:mm"))
+
+    def _remove_selected_restart_time(self) -> None:
+        for item in self.restart_times_list.selectedItems():
+            row = self.restart_times_list.row(item)
+            self.restart_times_list.takeItem(row)
+
+    def _restart_times(self) -> list[str]:
+        return [self.restart_times_list.item(index).text() for index in range(self.restart_times_list.count())]
 
     def _build_theme_picker(self) -> QGroupBox:
         group = QGroupBox("樣式主題")
